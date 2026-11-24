@@ -1,0 +1,77 @@
+name: Build Release APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Signed Release APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Cache Robolectric android-all artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            robolectric-${{ runner.os }}-
+
+      - name: Decode release keystore
+        run: |
+          if [ -z "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "::error::Missing GitHub secret ANDROID_KEYSTORE_BASE64. Create a stable release keystore once and save it as secrets ANDROID_KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS and KEY_PASSWORD, then re-run this workflow."
+            exit 1
+          fi
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > "${{ github.workspace }}/my-upload-key.jks"
+          ls -l "${{ github.workspace }}/my-upload-key.jks"
+
+      - name: Build signed Release APK
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
+          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          for attempt in 1 2 3; do
+            echo "=== Build attempt $attempt ==="
+            set +e
+            gradle assembleRelease --stacktrace 2>&1 | tee "build-$attempt.log"
+            status=${PIPESTATUS[0]}
+            set -e
+            if [ "$status" -eq 0 ]; then exit 0; fi
+            if grep -q "Failed to fetch maven artifact" "build-$attempt.log"; then
+              echo "Maven fetch failure detected, retrying..."
+              sleep 10
+              continue
+            fi
+            echo "Build failed for a non-Maven reason; see the log above."
+            exit "$status"
+          done
+          echo "Build failed after 3 attempts."
+          exit 1
+
+      - name: Show APK
+        run: ls -lh app/build/outputs/apk/release/
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-agent-release-apk
+          path: app/build/outputs/apk/release/app-release.apk
+          retention-days: 30
