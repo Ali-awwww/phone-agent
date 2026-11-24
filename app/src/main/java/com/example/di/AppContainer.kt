@@ -6,12 +6,17 @@ import com.example.data.local.ActionLogRepository
 import com.example.data.local.PhoneAgentDatabase
 import com.example.executor.CommandExecutor
 import com.example.organizer.AppOrganizer
+import com.example.policy.AgentPolicy
 import com.example.verifier.ScreenVerifier
 import com.example.voice.VoiceAssistantManager
 
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
     private val database by lazy { PhoneAgentDatabase.getInstance(appContext) }
+
+    val agentPolicy by lazy {
+        AgentPolicy()
+    }
 
     val actionLogRepository by lazy {
         ActionLogRepository(database.actionLogDao())
@@ -33,7 +38,8 @@ class AppContainer(context: Context) {
             context = appContext,
             actionLogRepository = actionLogRepository,
             geminiRepository = geminiRepository,
-            screenVerifier = screenVerifier
+            screenVerifier = screenVerifier,
+            agentPolicy = agentPolicy
         )
     }
 

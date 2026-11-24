@@ -14,6 +14,7 @@ import com.example.model.StepStatus
 import com.example.model.StepVerificationStatus
 import com.example.organizer.AppOrganizer
 import com.example.organizer.InstalledAppInfo
+import com.example.policy.AgentPolicy
 import com.example.service.ScreenStateBridge
 import com.example.verifier.ScreenVerifier
 import com.example.voice.VoiceAssistantManager
@@ -57,7 +58,8 @@ class CommandsViewModel(
     private val actionLogRepository: ActionLogRepository,
     private val appOrganizer: AppOrganizer,
     private val screenVerifier: ScreenVerifier,
-    private val voiceManager: VoiceAssistantManager
+    private val voiceManager: VoiceAssistantManager,
+    private val agentPolicy: AgentPolicy = AgentPolicy()
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(CommandsScreenState())
@@ -165,6 +167,49 @@ class CommandsViewModel(
                     mimeType = mimeType,
                     installedAppNames = cachedInstalledApps.map { it.label }
                 )
+                val appLabels = cachedInstalledApps.map { it.label }
+                val commandPolicy = agentPolicy.evaluateCommand(transcript, appLabels)
+                if (!commandPolicy.allowed) {
+                    actionLogRepository.logAction(
+                        title = "رفض أمر صوتي وفق سياسة الوكيل",
+                        details = "$transcript | السبب: ${commandPolicy.reasonAr}",
+                        status = ActionStatus.CANCELLED,
+                        actionType = "POLICY_REJECTED_AUDIO"
+                    )
+                    _state.update {
+                        it.copy(
+                            inputText = transcript,
+                            lastSpokenReply = commandPolicy.reasonAr,
+                            uiState = CommandsUiState.Error(commandPolicy.reasonAr)
+                        )
+                    }
+                    if (_state.value.voiceConversationMode) {
+                        voiceManager.speakArabic(commandPolicy.reasonAr)
+                    }
+                    return@launch
+                }
+
+                val planPolicy = agentPolicy.validatePlan(rawPlan)
+                if (!planPolicy.allowed) {
+                    actionLogRepository.logAction(
+                        title = "رفض خطة صوتية غير مطابقة للسياسة",
+                        details = "$transcript | السبب: ${planPolicy.reasonAr}",
+                        status = ActionStatus.CANCELLED,
+                        actionType = "POLICY_REJECTED_PLAN"
+                    )
+                    _state.update {
+                        it.copy(
+                            inputText = transcript,
+                            lastSpokenReply = planPolicy.reasonAr,
+                            uiState = CommandsUiState.Error(planPolicy.reasonAr)
+                        )
+                    }
+                    if (_state.value.voiceConversationMode) {
+                        voiceManager.speakArabic(planPolicy.reasonAr)
+                    }
+                    return@launch
+                }
+
                 val groundedPlan = screenVerifier.groundPlanAgainstReality(rawPlan, cachedInstalledApps)
                 _state.update {
                     it.copy(
@@ -216,15 +261,60 @@ class CommandsViewModel(
                     val saved = appOrganizer.organizationsFlow.first().associateBy { it.packageName }
                     cachedInstalledApps = appOrganizer.loadInstalledApps(saved)
                 }
+
+                // 1. فحص سياسة الوكيل محلياً قبل أي اتصال بـ Gemini
+                val appLabels = cachedInstalledApps.map { it.label }
+                val commandPolicy = agentPolicy.evaluateCommand(command, appLabels)
+                if (!commandPolicy.allowed) {
+                    actionLogRepository.logAction(
+                        title = "رفض أمر وفق سياسة الوكيل",
+                        details = "$command | السبب: ${commandPolicy.reasonAr}",
+                        status = ActionStatus.CANCELLED,
+                        actionType = "POLICY_REJECTED"
+                    )
+                    _state.update {
+                        it.copy(
+                            lastSpokenReply = commandPolicy.reasonAr,
+                            uiState = CommandsUiState.Error(commandPolicy.reasonAr)
+                        )
+                    }
+                    if (_state.value.voiceConversationMode) {
+                        voiceManager.speakArabic(commandPolicy.reasonAr)
+                    }
+                    return@launch
+                }
+
                 val screenSummary = ScreenStateBridge.getService()?.captureCurrentScreen()
                     ?.toCompactPromptText()
                     ?: "داخل تطبيق وكيل الهاتف (خدمة إمكانية الوصول غير مفعلة حالياً)"
 
                 val rawPlan = geminiRepository.generateCommandPlan(
                     userCommand = command,
-                    installedAppNames = cachedInstalledApps.map { it.label },
+                    installedAppNames = appLabels,
                     currentScreenSummary = screenSummary
                 )
+
+                // 2. فحص نية الخطة العائدة من Gemini قبل أي عرض أو تنفيذ
+                val planPolicy = agentPolicy.validatePlan(rawPlan)
+                if (!planPolicy.allowed) {
+                    actionLogRepository.logAction(
+                        title = "رفض خطة Gemini وفق سياسة الوكيل",
+                        details = "$command | السبب: ${planPolicy.reasonAr}",
+                        status = ActionStatus.CANCELLED,
+                        actionType = "POLICY_REJECTED_PLAN"
+                    )
+                    _state.update {
+                        it.copy(
+                            lastSpokenReply = planPolicy.reasonAr,
+                            uiState = CommandsUiState.Error(planPolicy.reasonAr)
+                        )
+                    }
+                    if (_state.value.voiceConversationMode) {
+                        voiceManager.speakArabic(planPolicy.reasonAr)
+                    }
+                    return@launch
+                }
+
                 val groundedPlan = screenVerifier.groundPlanAgainstReality(rawPlan, cachedInstalledApps)
 
                 _state.update {
@@ -273,6 +363,35 @@ class CommandsViewModel(
                             succeededList.add("الخطوة ${step.stepNumber}: ${step.titleAr}")
                         }
                         continue
+                    }
+
+                    // فحص السياسة لكل خطوة قبل طلب الموافقة أو التنفيذ
+                    val stepPolicy = agentPolicy.validateStep(step)
+                    if (!stepPolicy.allowed) {
+                        actionLogRepository.logAction(
+                            title = "إيقاف خطوة مخالفة للسياسة: ${step.titleAr}",
+                            details = stepPolicy.reasonAr,
+                            status = ActionStatus.CANCELLED,
+                            actionType = "POLICY_BLOCKED"
+                        )
+                        steps[index] = step.copy(
+                            status = StepStatus.CANCELLED,
+                            verificationStatus = StepVerificationStatus.VERIFICATION_FAILED,
+                            verificationResultAr = stepPolicy.reasonAr
+                        )
+                        failedList.add("الخطوة ${step.stepNumber} (${step.titleAr}): ${stepPolicy.reasonAr}")
+                        plan = plan.copy(steps = steps.toList(), isCancelled = true)
+                        _state.update {
+                            it.copy(
+                                uiState = CommandsUiState.PlanActive(plan),
+                                isExecuting = false,
+                                executionTruthReportAr = buildTruthReport(succeededList, failedList)
+                            )
+                        }
+                        if (_state.value.voiceConversationMode) {
+                            voiceManager.speakArabic(stepPolicy.reasonAr)
+                        }
+                        return@launch
                     }
 
                     // بوابة الأمان: عرض الخطة كاملة للمستخدم قبل أي فعل حساس وتسجيل الموافقة الصريحة
@@ -486,7 +605,8 @@ class CommandsViewModel(
         private val actionLogRepository: ActionLogRepository,
         private val appOrganizer: AppOrganizer,
         private val screenVerifier: ScreenVerifier,
-        private val voiceManager: VoiceAssistantManager
+        private val voiceManager: VoiceAssistantManager,
+        private val agentPolicy: AgentPolicy = AgentPolicy()
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -496,7 +616,8 @@ class CommandsViewModel(
                 actionLogRepository,
                 appOrganizer,
                 screenVerifier,
-                voiceManager
+                voiceManager,
+                agentPolicy
             ) as T
         }
     }

@@ -119,7 +119,8 @@ fun PhoneAgentApp(
             actionLogRepository = appContainer.actionLogRepository,
             appOrganizer = appContainer.appOrganizer,
             screenVerifier = appContainer.screenVerifier,
-            voiceManager = appContainer.voiceAssistantManager
+            voiceManager = appContainer.voiceAssistantManager,
+            agentPolicy = appContainer.agentPolicy
         )
     )
     val appsViewModel: AppsViewModel = viewModel(

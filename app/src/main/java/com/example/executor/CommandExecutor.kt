@@ -17,6 +17,7 @@ import com.example.model.ScreenVerificationResult
 import com.example.model.StepActionType
 import com.example.model.StepVerificationStatus
 import com.example.organizer.InstalledAppInfo
+import com.example.policy.AgentPolicy
 import com.example.service.ScreenStateBridge
 import com.example.verifier.ScreenVerifier
 import kotlinx.coroutines.delay
@@ -37,7 +38,8 @@ class CommandExecutor(
     private val context: Context,
     private val actionLogRepository: ActionLogRepository,
     private val geminiRepository: GeminiRepository,
-    private val screenVerifier: ScreenVerifier
+    private val screenVerifier: ScreenVerifier,
+    private val agentPolicy: AgentPolicy = AgentPolicy()
 ) {
     fun findMatchingAppPackage(appNameOrPackage: String, installedApps: List<InstalledAppInfo>): InstalledAppInfo? {
         return screenVerifier.matchRealInstalledApp(appNameOrPackage, installedApps)
@@ -47,6 +49,28 @@ class CommandExecutor(
         step: AgentPlanStep,
         installedApps: List<InstalledAppInfo>
     ): StepExecutionOutcome {
+        // 0. فحص سياسة الوكيل الصارمة قبل أي خطوة
+        val policyCheck = agentPolicy.validateStep(step)
+        if (!policyCheck.allowed) {
+            val logId = actionLogRepository.logAction(
+                title = step.titleAr,
+                details = "رُفضت الخطوة وفق سياسة الأمان: ${policyCheck.reasonAr}",
+                status = ActionStatus.CANCELLED,
+                actionType = "POLICY_BLOCKED_${step.actionType.name}"
+            )
+            return StepExecutionOutcome(
+                success = false,
+                messageAr = policyCheck.reasonAr,
+                verification = ScreenVerificationResult(
+                    verified = false,
+                    status = StepVerificationStatus.VERIFICATION_FAILED,
+                    explanationAr = policyCheck.reasonAr,
+                    sensitiveUiDetected = true
+                ),
+                logId = logId
+            )
+        }
+
         val preSnapshot = ScreenStateBridge.getService()?.captureCurrentScreen()
             ?: ScreenStateBridge.latestSnapshot.value
 

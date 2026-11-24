@@ -1,0 +1,138 @@
+package com.example.policy
+
+import com.example.model.AgentPlan
+import com.example.model.AgentPlanStep
+import com.example.model.StepActionType
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class AgentPolicyTest {
+
+    private val policy = AgentPolicy()
+
+    @Test
+    fun `allows in-scope commands across all three permitted areas`() {
+        val inScopeCommands = listOf(
+            "رتّب تطبيقاتي في مجلدات",
+            "رتّب تطبيقات التسوق في مجلد خاص",
+            "افتح تطبيق الساعة واضبط منبهاً على الساعة السابعة",
+            "أرسل رسالة لوالدي عبر واتساب",
+            "افتح إعدادات الواي فاي",
+            "جرّب تطبيق الخرائط ولخّص محتواه بالعربية"
+        )
+
+        for (command in inScopeCommands) {
+            val decision = policy.evaluateCommand(command)
+            assertTrue("Expected command to be allowed: $command -> ${decision.reasonAr}", decision.allowed)
+        }
+    }
+
+    @Test
+    fun `rejects general off-phone questions with polite Arabic apology and suggestions`() {
+        val generalQuestions = listOf(
+            "ما هي عاصمة فرنسا؟",
+            "اكتب لي قصيدة جميلة عن البحر",
+            "ما هو ناتج 45 ضرب 12؟",
+            "اشرح لي نظرية النسبية"
+        )
+
+        for (question in generalQuestions) {
+            val decision = policy.evaluateCommand(question)
+            assertFalse("Expected off-scope question to be rejected: $question", decision.allowed)
+            assertTrue(decision.reasonAr.contains("عذراً"))
+            assertTrue(decision.reasonAr.contains("تنظيم التطبيقات"))
+        }
+    }
+
+    @Test
+    fun `rejects all eight forbidden items individually`() {
+        val forbiddenCases = listOf(
+            "أدخل كلمة المرور تلقائياً" to ForbiddenCategory.PASSWORDS,
+            "استخدم البصمة لتأكيد الدخول" to ForbiddenCategory.BIOMETRICS,
+            "قم بالدفع الإلكتروني للفاتورة الآن" to ForbiddenCategory.PAYMENTS,
+            "نفّذ عملية شراء لهذا المنتج فوراً" to ForbiddenCategory.PURCHASES,
+            "أرسل أموالاً بقيمة 200 ريال لصديقي" to ForbiddenCategory.MONEY_TRANSFER,
+            "قم بحذف البيانات والصور من التطبيق" to ForbiddenCategory.DATA_DELETION,
+            "غيّر إعدادات الحسابات المرتبطة بجوجل" to ForbiddenCategory.ACCOUNT_SETTINGS,
+            "قم بتجاوز قفل الشاشة للدخول مباشرة" to ForbiddenCategory.LOCK_SCREEN_BYPASS
+        )
+
+        for ((command, expectedCategory) in forbiddenCases) {
+            val decision = policy.evaluateCommand(command)
+            assertFalse("Expected forbidden command to be rejected: $command", decision.allowed)
+            assertEquals(
+                "Expected category ${expectedCategory.titleAr} for: $command",
+                expectedCategory,
+                decision.violationCategory
+            )
+        }
+    }
+
+    @Test
+    fun `rejects Gemini plan when any step contains a forbidden action`() {
+        val unsafePlan = AgentPlan(
+            originalCommand = "افتح الإعدادات",
+            understandingSummaryAr = "فتح الإعدادات وإتمام إجراء داخل الحساب",
+            spokenReplyAr = "سأفتح الإعدادات أولاً",
+            steps = listOf(
+                AgentPlanStep(
+                    stepNumber = 1,
+                    titleAr = "فتح تطبيق الإعدادات",
+                    descriptionAr = "فتح شاشة الإعدادات",
+                    actionType = StepActionType.OPEN_APP,
+                    targetAppName = "الإعدادات"
+                ),
+                AgentPlanStep(
+                    stepNumber = 2,
+                    titleAr = "إرسال أموال للمستخدم",
+                    descriptionAr = "تحويل مبلغ 100 ريال عبر المحفظة",
+                    actionType = StepActionType.TAP_ELEMENT,
+                    targetQueryOrText = "إرسال أموال"
+                )
+            )
+        )
+
+        val planDecision = policy.validatePlan(unsafePlan)
+        assertFalse("Plan with forbidden step must be rejected", planDecision.allowed)
+        assertEquals(ForbiddenCategory.MONEY_TRANSFER, planDecision.violationCategory)
+    }
+
+    @Test
+    fun `rejects CHANGE_SETTING step targeting account settings`() {
+        val accountStep = AgentPlanStep(
+            stepNumber = 1,
+            titleAr = "تعديل خيار",
+            descriptionAr = "الانتقال لتعديل الحساب الشخصي",
+            actionType = StepActionType.CHANGE_SETTING,
+            targetQueryOrText = "إعدادات الحساب"
+        )
+
+        val stepDecision = policy.validateStep(accountStep)
+        assertFalse(stepDecision.allowed)
+        assertEquals(ForbiddenCategory.ACCOUNT_SETTINGS, stepDecision.violationCategory)
+    }
+
+    @Test
+    fun `allows valid safe plan without forbidden steps`() {
+        val safePlan = AgentPlan(
+            originalCommand = "افتح المنبه على الساعة السابعة",
+            understandingSummaryAr = "ضبط منبه الساعة السابعة صباحاً",
+            spokenReplyAr = "سأفتح تطبيق الساعة لضبط المنبه على السابعة.",
+            steps = listOf(
+                AgentPlanStep(
+                    stepNumber = 1,
+                    titleAr = "ضبط المنبه",
+                    descriptionAr = "ضبط منبه على الساعة 07:00",
+                    actionType = StepActionType.SET_ALARM,
+                    hour = 7,
+                    minute = 0
+                )
+            )
+        )
+
+        val decision = policy.validatePlan(safePlan)
+        assertTrue("Safe plan should be allowed: ${decision.reasonAr}", decision.allowed)
+    }
+}
