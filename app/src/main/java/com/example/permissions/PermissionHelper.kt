@@ -29,8 +29,7 @@ data class AgentPermissionItem(
     val titleAr: String,
     val explanationAr: String,
     val isGranted: Boolean,
-    val isRuntimePermission: Boolean,
-    val isInstallTimePermission: Boolean = false
+    val isRuntimePermission: Boolean
 )
 
 object PermissionHelper {
@@ -47,21 +46,20 @@ object PermissionHelper {
             AgentPermissionItem(
                 type = AgentPermissionType.QUERY_ALL_PACKAGES,
                 titleAr = "قراءة قائمة التطبيقات (QUERY_ALL_PACKAGES)",
-                explanationAr = "ضرورية لعرض جميع التطبيقات المثبتة على هاتفك وتصنيفها في مجلدات (تواصل، عمل، ألعاب...) والبحث فيها وفتحها بأمرك.",
+                explanationAr = "معلنة في التطبيق لعرض جميع التطبيقات المثبتة على هاتفك وتصنيفها في مجلدات (تواصل، عمل، ألعاب...) والبحث فيها وفتحها بأمرك.",
                 isGranted = isQueryAllPackagesGranted(context),
-                isRuntimePermission = false,
-                isInstallTimePermission = true
+                isRuntimePermission = false
             ),
             AgentPermissionItem(
                 type = AgentPermissionType.USAGE_ACCESS,
-                titleAr = "إحصائيات استخدام التطبيقات",
+                titleAr = "إحصائيات استخدام التطبيقات (PACKAGE_USAGE_STATS)",
                 explanationAr = "تساعد الوكيل على معرفة التطبيقات التي لم تستخدمها منذ فترة طويلة لاقتراح إخفائها وتنظيم شاشتك.",
                 isGranted = isUsageAccessGranted(context),
                 isRuntimePermission = false
             ),
             AgentPermissionItem(
                 type = AgentPermissionType.MICROPHONE,
-                titleAr = "الميكروفون (الأوامر الصوتية)",
+                titleAr = "الميكروفون (RECORD_AUDIO)",
                 explanationAr = "يسمح لك بالتحدث إلى «وكيل الهاتف» بالعربية وإجراء محادثات صوتية مباشرة دون الحاجة للكتابة.",
                 isGranted = ContextCompat.checkSelfPermission(
                     context,
@@ -71,7 +69,7 @@ object PermissionHelper {
             ),
             AgentPermissionItem(
                 type = AgentPermissionType.NOTIFICATIONS,
-                titleAr = "الإشعارات",
+                titleAr = "الإشعارات (POST_NOTIFICATIONS)",
                 explanationAr = "تُستخدم لإرسال التنبيهات والتذكيرات التي تطلب من الوكيل جدولتها لك في الوقت المحدد.",
                 isGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
                     ContextCompat.checkSelfPermission(
@@ -82,7 +80,7 @@ object PermissionHelper {
             ),
             AgentPermissionItem(
                 type = AgentPermissionType.EXACT_ALARMS,
-                titleAr = "المنبهات والتذكيرات الدقيقة",
+                titleAr = "المنبهات والتذكيرات الدقيقة (SCHEDULE_EXACT_ALARM)",
                 explanationAr = "تتيح للوكيل ضبط المنبهات والتذكيرات في الوقت الدقيق الذي تحدده دون تأخير.",
                 isGranted = isExactAlarmGranted(context),
                 isRuntimePermission = false
@@ -138,35 +136,70 @@ object PermissionHelper {
         return alarmManager.canScheduleExactAlarms()
     }
 
-    fun buildSettingsIntent(context: Context, type: AgentPermissionType): Intent {
-        return when (type) {
-            AgentPermissionType.ACCESSIBILITY ->
-                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-            AgentPermissionType.USAGE_ACCESS ->
-                Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
-            AgentPermissionType.EXACT_ALARMS ->
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    Intent(
-                        Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
-                        Uri.parse("package:${context.packageName}")
-                    )
-                } else {
-                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
+    fun openPermissionSettings(context: Context, type: AgentPermissionType): Boolean {
+        val candidates = buildSettingsCandidateIntents(context, type)
+        for (intent in candidates) {
+            try {
+                if (intent.resolveActivity(context.packageManager) != null) {
+                    context.startActivity(intent)
+                    return true
                 }
-            AgentPermissionType.NOTIFICATIONS ->
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            } catch (_: Exception) {
+                // جرّب المسار الاحتياطي التالي
+            }
+        }
+        return try {
+            context.startActivity(buildAppDetailsIntent(context))
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun buildSettingsCandidateIntents(
+        context: Context,
+        type: AgentPermissionType
+    ): List<Intent> {
+        val pkgUri = Uri.parse("package:${context.packageName}")
+        val list = when (type) {
+            AgentPermissionType.ACCESSIBILITY -> listOf(
+                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS),
+                Intent(Settings.ACTION_SETTINGS)
+            )
+            AgentPermissionType.USAGE_ACCESS -> listOf(
+                Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS, pkgUri),
+                Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS),
+                buildAppDetailsIntent(context)
+            )
+            AgentPermissionType.EXACT_ALARMS -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                listOf(
+                    Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, pkgUri),
+                    buildAppDetailsIntent(context)
+                )
+            } else {
+                listOf(buildAppDetailsIntent(context))
+            }
+            AgentPermissionType.NOTIFICATIONS -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                listOf(
                     Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
                         putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                    }
-                } else {
-                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
-                }
-            else ->
-                Intent(
-                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    Uri.parse("package:${context.packageName}")
+                    },
+                    buildAppDetailsIntent(context)
                 )
-        }.apply {
+            } else {
+                listOf(buildAppDetailsIntent(context))
+            }
+            AgentPermissionType.MICROPHONE,
+            AgentPermissionType.QUERY_ALL_PACKAGES -> listOf(buildAppDetailsIntent(context))
+        }
+        return list.map { it.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) } }
+    }
+
+    private fun buildAppDetailsIntent(context: Context): Intent {
+        return Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:${context.packageName}")
+        ).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
     }

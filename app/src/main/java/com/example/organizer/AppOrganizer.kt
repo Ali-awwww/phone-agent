@@ -218,9 +218,14 @@ class AppOrganizer(
         }
 
         if (capturedScreens.isEmpty()) {
-            capturedScreens.add(
-                "اسم التطبيق: ${app.label}\nالحزمة: ${app.packageName}\nملاحظة: خدمة إمكانية الوصول غير مفعلة لقراءة العناصر الداخلية، اعتمد على معلومات الحزمة والتصنيف (${app.folder.titleAr})."
+            val truthfulNotice = "تم فتح تطبيق «${app.label}» بنجاح، لكن خدمة إمكانية الوصول غير مفعلة حالياً لقراءة عناصر شاشته الفعلية.\n\nلتجربة التطبيق وتلخيص محتواه بدقة دون تخمين، فعّل «خدمة إمكانية الوصول» من تبويب الأذونات ثم أعد المحاولة."
+            actionLogRepository.logAction(
+                title = "فتح «${app.label}» (تعذر التلخيص لعدم تفعيل الوصول)",
+                details = truthfulNotice,
+                status = ActionStatus.PENDING_APPROVAL,
+                actionType = "SUMMARIZE_APP"
             )
+            return truthfulNotice
         }
 
         val summary = geminiRepository.summarizeAppScreens(

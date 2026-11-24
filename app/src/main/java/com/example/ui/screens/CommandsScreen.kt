@@ -125,6 +125,8 @@ fun CommandsScreen(
     ) { granted ->
         if (granted) {
             viewModel.startVoiceCapture()
+        } else {
+            viewModel.reportMicPermissionDenied()
         }
     }
 
@@ -401,7 +403,8 @@ fun CommandsScreen(
                             isExecuting = state.isExecuting,
                             onExecuteAll = { viewModel.executePlanStepByStep(singleStepOnly = false) },
                             onExecuteNext = { viewModel.executePlanStepByStep(singleStepOnly = true) },
-                            onCancel = { viewModel.cancelActivePlan() }
+                            onCancel = { viewModel.cancelActivePlan() },
+                            onNewCommand = { viewModel.resetToIdle() }
                         )
                     }
 
@@ -749,7 +752,8 @@ private fun PlanSummaryAndControlsCard(
     isExecuting: Boolean,
     onExecuteAll: () -> Unit,
     onExecuteNext: () -> Unit,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    onNewCommand: () -> Unit
 ) {
     CyberPanelCard(glowAccent = true) {
         Column(
@@ -821,26 +825,43 @@ private fun PlanSummaryAndControlsCard(
                 }
             }
 
-            OutlinedButton(
-                onClick = onCancel,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp)
-                    .testTag("cancel_plan_button"),
-                border = BorderStroke(1.dp, StatusCancelled),
-                shape = MaterialTheme.shapes.small
-            ) {
-                Icon(
-                    imageVector = if (isExecuting) Icons.Rounded.Stop else Icons.Rounded.Cancel,
-                    contentDescription = null,
-                    tint = StatusCancelled
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    stringResource(R.string.cancel_plan_button),
-                    style = MaterialTheme.typography.labelLarge,
-                    color = StatusCancelled
-                )
+            if (plan.isComplete || plan.isCancelled) {
+                Button(
+                    onClick = onNewCommand,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("new_command_button"),
+                    shape = MaterialTheme.shapes.small,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = CyberElectricBlue,
+                        contentColor = Color.White
+                    )
+                ) {
+                    Text("أمر جديد / مسح الخطة", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                }
+            } else {
+                OutlinedButton(
+                    onClick = onCancel,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("cancel_plan_button"),
+                    border = BorderStroke(1.dp, StatusCancelled),
+                    shape = MaterialTheme.shapes.small
+                ) {
+                    Icon(
+                        imageVector = if (isExecuting) Icons.Rounded.Stop else Icons.Rounded.Cancel,
+                        contentDescription = null,
+                        tint = StatusCancelled
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        stringResource(R.string.cancel_plan_button),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = StatusCancelled
+                    )
+                }
             }
         }
     }

@@ -42,6 +42,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -78,6 +81,7 @@ fun PermissionsScreen(
     val permissions by viewModel.permissions.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    var pendingRuntimeType by remember { mutableStateOf<AgentPermissionType?>(null) }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -91,7 +95,12 @@ fun PermissionsScreen(
 
     val runtimePermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) {
+    ) { granted ->
+        if (!granted && pendingRuntimeType != null) {
+            // إذا تم رفض الإذن نهائياً نفتح إعدادات التطبيق مباشرة ليتمكن المستخدم من تفعيله
+            PermissionHelper.openPermissionSettings(context, pendingRuntimeType!!)
+        }
+        pendingRuntimeType = null
         viewModel.refresh()
     }
 
@@ -170,15 +179,17 @@ fun PermissionsScreen(
                     onEnableClick = {
                         when {
                             item.type == AgentPermissionType.MICROPHONE && !item.isGranted -> {
+                                pendingRuntimeType = AgentPermissionType.MICROPHONE
                                 runtimePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             }
                             item.type == AgentPermissionType.NOTIFICATIONS &&
                                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                                 !item.isGranted -> {
+                                pendingRuntimeType = AgentPermissionType.NOTIFICATIONS
                                 runtimePermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                             }
                             else -> {
-                                context.startActivity(PermissionHelper.buildSettingsIntent(context, item.type))
+                                PermissionHelper.openPermissionSettings(context, item.type)
                             }
                         }
                     }
@@ -300,36 +311,34 @@ private fun PermissionItemCard(
                 color = CyberTextSecondary
             )
 
-            if (!item.isInstallTimePermission) {
-                if (!item.isGranted) {
-                    Button(
-                        onClick = onEnableClick,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(50.dp)
-                            .testTag("enable_perm_${item.type.name}"),
-                        shape = MaterialTheme.shapes.small,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = CyberElectricCyan,
-                            contentColor = CyberOnCyan
-                        )
-                    ) {
-                        Icon(Icons.Rounded.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(stringResource(R.string.permission_enable_button), fontWeight = FontWeight.Bold)
-                    }
-                } else {
-                    OutlinedButton(
-                        onClick = onEnableClick,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
-                            .testTag("settings_perm_${item.type.name}"),
-                        shape = MaterialTheme.shapes.small,
-                        border = BorderStroke(1.dp, CyberBorderGlow)
-                    ) {
-                        Text(stringResource(R.string.permission_settings_button), color = CyberElectricCyan)
-                    }
+            if (!item.isGranted) {
+                Button(
+                    onClick = onEnableClick,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("enable_perm_${item.type.name}"),
+                    shape = MaterialTheme.shapes.small,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = CyberElectricCyan,
+                        contentColor = CyberOnCyan
+                    )
+                ) {
+                    Icon(Icons.Rounded.Settings, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.permission_enable_button), fontWeight = FontWeight.Bold)
+                }
+            } else {
+                OutlinedButton(
+                    onClick = onEnableClick,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("settings_perm_${item.type.name}"),
+                    shape = MaterialTheme.shapes.small,
+                    border = BorderStroke(1.dp, CyberBorderGlow)
+                ) {
+                    Text(stringResource(R.string.permission_settings_button), color = CyberElectricCyan)
                 }
             }
         }

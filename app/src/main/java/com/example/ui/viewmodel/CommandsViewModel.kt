@@ -466,6 +466,15 @@ class CommandsViewModel(
         }
     }
 
+    fun reportMicPermissionDenied() {
+        _state.update {
+            it.copy(
+                isListening = false,
+                uiState = CommandsUiState.Error("إذن الميكروفون غير مفعل. يمكنك تفعيله من تبويب «الأذونات» أو كتابة أمرك نصياً.")
+            )
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         voiceManager.release()
