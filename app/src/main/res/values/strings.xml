@@ -1,0 +1,57 @@
+<resources>
+    <string name="app_name">وكيل الهاتف</string>
+    <string name="accessibility_service_label">وكيل الهاتف - المساعد الذكي</string>
+    <string name="accessibility_service_summary">يسمح لوكيل الهاتف بقراءة محتوى الشاشة والضغط على الأزرار نيابة عنك بموافقتك.</string>
+    <string name="accessibility_service_description">يستخدم تطبيق «وكيل الهاتف» خدمة إمكانية الوصول فقط لتنفيذ الأوامر التي تطلبها بالصوت أو النص خطوة بخطوة، والتحقق من محتوى الشاشة قبل الانتقال للخطوة التالية، وتلخيص التطبيقات الجديدة، مع طلب موافقتك قبل أي إجراء حساس. لا يتم إرسال بيانات كلمات المرور أو الدفع.</string>
+
+    <!-- أسماء التبويبات -->
+    <string name="nav_commands">الأوامر</string>
+    <string name="nav_apps">التطبيقات</string>
+    <string name="nav_logs">السجل</string>
+    <string name="nav_permissions">الأذونات</string>
+
+    <!-- شاشة الأوامر -->
+    <string name="commands_title">شاشة الأوامر</string>
+    <string name="commands_subtitle">تحدث أو اكتب ما تريد وسأنفذه خطوة بخطوة</string>
+    <string name="voice_button_start">اضغط للتحدث</string>
+    <string name="voice_button_listening">أستمع إليك الآن...</string>
+    <string name="voice_conversation_toggle">محادثة صوتية</string>
+    <string name="command_input_hint">اكتب أمرك بالعربية... مثال: افتح واتساب أو اضبط منبهاً للساعة 7</string>
+    <string name="build_plan_button">تحليل وتجهيز الخطة</string>
+    <string name="execute_all_button">تنفيذ الخطة خطوة بخطوة</string>
+    <string name="execute_next_button">تنفيذ الخطوة التالية</string>
+    <string name="cancel_plan_button">إلغاء الأمر</string>
+    <string name="approval_title">تأكيد إجراء حساس</string>
+    <string name="approval_confirm">موافق، نفّذ الآن</string>
+    <string name="approval_cancel">إلغاء الإجراء</string>
+
+    <!-- شاشة تنظيم التطبيقات -->
+    <string name="apps_title">تنظيم التطبيقات</string>
+    <string name="apps_search_hint">ابحث عن تطبيق بالاسم...</string>
+    <string name="apps_auto_categorize">تصنيف تلقائي بالذكاء الاصطناعي</string>
+    <string name="apps_show_hidden">إظهار المخفية</string>
+    <string name="apps_hide_hidden">إخفاء المخفية</string>
+    <string name="apps_try_and_summarize">جرّب ولخّص</string>
+    <string name="apps_open">فتح</string>
+    <string name="apps_move_folder">نقل إلى مجلد</string>
+    <string name="apps_hide">إخفاء</string>
+    <string name="apps_unhide">إظهار</string>
+
+    <!-- شاشة سجل الأفعال -->
+    <string name="logs_title">سجل الأفعال</string>
+    <string name="logs_empty">لا توجد إجراءات مسجلة بعد. ابدأ بإعطاء أمر للوكيل.</string>
+    <string name="logs_undo">تراجع</string>
+    <string name="logs_clear">مسح السجل</string>
+
+    <!-- شاشة الأذونات -->
+    <string name="permissions_title">الأذونات والصلاحيات</string>
+    <string name="permissions_subtitle">نشرح لك كل إذن بوضوح ولماذا نحتاجه</string>
+    <string name="permission_enabled">مفعّل</string>
+    <string name="permission_disabled">غير مفعّل</string>
+    <string name="permission_enable_button">تفعيل الآن</string>
+    <string name="permission_settings_button">فتح الإعدادات</string>
+
+    <!-- قناة الإشعارات -->
+    <string name="notification_channel_reminders_name">تذكيرات وكيل الهاتف</string>
+    <string name="notification_channel_reminders_desc">إشعارات التذكيرات والمواعيد التي يضبطها وكيل الهاتف</string>
+</resources>
