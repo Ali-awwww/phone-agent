@@ -6,7 +6,7 @@ import android.util.Log
 import com.example.BuildConfig
 import com.google.android.gms.tasks.Task
 import com.google.firebase.FirebaseApp
-import com.google.firebase.appcheck.AppCheckToken
+import com.google.firebase.appcheck.AppCheckTokenResult
 import com.google.firebase.appcheck.FirebaseAppCheck
 import com.google.firebase.appcheck.debug.DebugAppCheckProviderFactory
 import com.google.firebase.appcheck.playintegrity.PlayIntegrityAppCheckProviderFactory
@@ -65,7 +65,6 @@ fun configureAppCheck(context: Context, intent: Intent?) {
         if (FirebaseApp.getApps(context).isEmpty()) {
             FirebaseApp.initializeApp(context)
         }
-
         if (BuildConfig.DEBUG) {
             val debugToken = intent?.getStringExtra(DEBUG_TOKEN_EXTRA)
             if (!debugToken.isNullOrEmpty()) {
@@ -92,7 +91,6 @@ fun configureAppCheck(context: Context, intent: Intent?) {
             FirebaseAppCheck.getInstance().setTokenAutoRefreshEnabled(true)
             Log.d(TAG, "PlayIntegrityAppCheckProviderFactory installed.")
         }
-
         // Warm up the token before the first Gemini (Firebase AI Logic)
         // call, so a stale or missing token is refreshed early instead
         // of failing the first command.
@@ -111,7 +109,7 @@ private fun warmUpAppCheckToken(context: Context) {
     val forceRefresh = !BuildConfig.DEBUG &&
         !prefs.getBoolean(KEY_PLAY_INTEGRITY_TOKEN_REFRESHED, false)
     appCheck.getToken(forceRefresh)
-        .addOnSuccessListener { token: AppCheckToken ->
+        .addOnSuccessListener { token: AppCheckTokenResult ->
             if (token.token.isNotBlank()) {
                 prefs.edit().putBoolean(KEY_PLAY_INTEGRITY_TOKEN_REFRESHED, true).apply()
                 Log.d(TAG, "App Check token ready.")
@@ -120,7 +118,7 @@ private fun warmUpAppCheckToken(context: Context) {
         .addOnFailureListener { error ->
             Log.w(TAG, "App Check token fetch failed, forcing a refresh.", error)
             appCheck.getToken(true)
-                .addOnSuccessListener { token: AppCheckToken ->
+                .addOnSuccessListener { token: AppCheckTokenResult ->
                     if (token.token.isNotBlank()) {
                         prefs.edit().putBoolean(KEY_PLAY_INTEGRITY_TOKEN_REFRESHED, true).apply()
                         Log.d(TAG, "App Check token refreshed.")
