@@ -75,7 +75,9 @@ jobs:
       - name: Show APK and print signing certificate fingerprints
         run: |
           ls -lh app/build/outputs/apk/release/app-release.apk
-          keytool -printcert -jarfile app/build/outputs/apk/release/app-release.apk
+          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)
+          echo "Using apksigner: $APKSIGNER"
+          "$APKSIGNER" verify --print-certs --verbose app/build/outputs/apk/release/app-release.apk
           sha256sum app/build/outputs/apk/release/app-release.apk
 
       - name: Create GitHub Release with the signed APK
@@ -86,5 +88,5 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" app/build/outputs/apk/release/app-release.apk --clobber
           else
-            gh release create "$TAG" app/build/outputs/apk/release/app-release.apk --title "$TAG" --notes "إصلاح خطأ Gemini: تصحيح مفتاح Firebase API في google-services.json وإضافة مفتاح موقع reCAPTCHA لـ App Check. ثبّت هذا الإصدار بدلاً من v1.0."
+            gh release create "$TAG" app/build/outputs/apk/release/app-release.apk --title "$TAG" --notes "إصلاح خطأ Gemini: تصحيح مفتاح Firebase API في google-services.json. ثبّت هذا الإصدار بدلاً من v1.0."
           fi
