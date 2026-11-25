@@ -7,6 +7,9 @@ import com.example.model.AppFolder
 import com.example.model.ScreenSnapshot
 import com.example.model.ScreenVerificationResult
 import com.example.model.StepActionType
+import com.example.security.ensureAppCheckToken
+import com.example.security.isAppCheckTokenError
+import com.example.security.refreshAppCheckToken
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Schema
@@ -19,6 +22,28 @@ import org.json.JSONObject
 private const val TAG = "GeminiRepository"
 
 class GeminiRepository {
+
+    /**
+     * Runs a Gemini (Firebase AI Logic) call. Before the first attempt it
+     * makes sure an App Check token exists, and when Firebase AI Logic
+     * rejects the token ("Firebase App Check token is invalid") it forces
+     * a fresh Play Integrity token once and retries the call once.
+     * Without this, a stale token cached under the previous provider
+     * failed every command with no recovery (v1.0.2).
+     */
+    private suspend fun <T> withAppCheckRetry(block: suspend () -> T): T {
+        ensureAppCheckToken()
+        return try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (!isAppCheckTokenError(e)) throw e
+            Log.w(TAG, "Gemini call rejected the App Check token; forcing a refresh and retrying once.", e)
+            refreshAppCheckToken()
+            block()
+        }
+    }
 
     private fun buildStepsArraySchema(): Schema = Schema.array(
         items = Schema.obj(
@@ -178,8 +203,10 @@ class GeminiRepository {
                 appendLine("أنشئ خطة تنفيذ دقيقة خطوة بخطوة بصيغة JSON حسب المخطط المطلوب.")
             }
 
-            val response = withTimeout(60_000L) {
-                plannerModel.generateContent(prompt)
+            val response = withAppCheckRetry {
+                withTimeout(60_000L) {
+                    plannerModel.generateContent(prompt)
+                }
             }
             val jsonText = response.text ?: throw IllegalStateException("لم يُرجع النموذج استجابة صالحة.")
             return parsePlanJson(userCommand, JSONObject(jsonText))
@@ -201,13 +228,15 @@ class GeminiRepository {
                 appendLine("استمع إلى التسجيل الصوتي للمستخدم باللغة العربية، اكتب النص المفهوم في transcriptAr، ثم أنشئ خطة الخطوات التنفيذية.")
                 appendLine("التطبيقات المتاحة: ${installedAppNames.take(40).joinToString("، ")}")
             }
-            val response = withTimeout(60_000L) {
-                audioPlannerModel.generateContent(
-                    content {
-                        inlineData(audioBytes, mimeType)
-                        text(prompt)
-                    }
-                )
+            val response = withAppCheckRetry {
+                withTimeout(60_000L) {
+                    audioPlannerModel.generateContent(
+                        content {
+                            inlineData(audioBytes, mimeType)
+                            text(prompt)
+                        }
+                    )
+                }
             }
             val jsonText = response.text ?: throw IllegalStateException("لم يتم استلام رد من النموذج الصوتي.")
             val json = JSONObject(jsonText)
@@ -247,8 +276,10 @@ class GeminiRepository {
                 appendLine("محتوى الشاشة المرصود الآن:")
                 appendLine(snapshot.toCompactPromptText())
             }
-            val response = withTimeout(45_000L) {
-                verifierModel.generateContent(prompt)
+            val response = withAppCheckRetry {
+                withTimeout(45_000L) {
+                    verifierModel.generateContent(prompt)
+                }
             }
             val json = JSONObject(response.text ?: "{}")
             ScreenVerificationResult(
@@ -288,8 +319,10 @@ class GeminiRepository {
                 $joined
             """.trimIndent()
 
-            val response = withTimeout(60_000L) {
-                generalArabicModel.generateContent(prompt)
+            val response = withAppCheckRetry {
+                withTimeout(60_000L) {
+                    generalArabicModel.generateContent(prompt)
+                }
             }
             return response.text?.trim()
                 ?: throw IllegalStateException("لم يُرجع النموذج ملخصاً.")
@@ -314,8 +347,10 @@ class GeminiRepository {
                 $formatted
             """.trimIndent()
 
-            val response = withTimeout(60_000L) {
-                categorizerModel.generateContent(prompt)
+            val response = withAppCheckRetry {
+                withTimeout(60_000L) {
+                    categorizerModel.generateContent(prompt)
+                }
             }
             val json = JSONObject(response.text ?: "{}")
             val array = json.optJSONArray("assignments") ?: return emptyMap()
@@ -344,8 +379,10 @@ class GeminiRepository {
                 سياق الحالة الحالية: $contextSummary
                 أجب برد عربي طبيعي ومختصر ومفيد كأنك تتحدث مع المستخدم مباشرة.
             """.trimIndent()
-            val response = withTimeout(45_000L) {
-                generalArabicModel.generateContent(prompt)
+            val response = withAppCheckRetry {
+                withTimeout(45_000L) {
+                    generalArabicModel.generateContent(prompt)
+                }
             }
             response.text?.trim() ?: "أنا معك، أخبرني بما تريد تنفيذه على هاتفك."
         } catch (e: CancellationException) {
