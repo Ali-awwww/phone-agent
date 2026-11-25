@@ -59,19 +59,19 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -83,63 +83,63 @@ import androidx.core.content.ContextCompat
 import com.example.R
 import com.example.model.AgentPlan
 import com.example.model.AgentPlanStep
-import com.example.model.PlanState
 import com.example.model.StepActionType
-import com.example.model.StepExecutionState
+import com.example.model.StepStatus
+import com.example.ui.viewmodel.CommandsUiState
+import com.example.ui.viewmodel.CommandsViewModel
 
-// شاشة الأوامر: أحجام متوازنة (v1.0.3) — زر الميكروفون 72dp بدل 104dp،
-// وأزرار التنفيذ 48dp، والاقتراحات في FlowRow تلتف على عدة أسطر
-// فلا يُقصّ أي نص داخل الشريحة.
+// شاشة الأوامر — متوافقة مع CommandsViewModel و CommandsUiState.
+// - زر ميكروفون مدمج (72dp) ونبض خفيف، وأزرار تنفيذ 48dp.
+// - الاقتراحات تُعرض في FlowRow متعدد الأسطر فلا يُقص أي نص.
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun CommandsScreen(
-    commandText: String,
-    onCommandTextChange: (String) -> Unit,
-    onSendCommand: () -> Unit,
-    onMicPressed: () -> Unit,
-    isRecording: Boolean,
-    recordingSeconds: Int,
-    transcriptText: String,
-    isBusy: Boolean,
-    isExecutingPlan: Boolean,
-    plan: AgentPlan?,
-    planState: PlanState,
-    executionMessage: String,
-    errorMessage: String,
-    isCancellingExecution: Boolean,
-    needsApprovalForStep: AgentPlanStep?,
-    onNewPlan: () -> Unit,
-    onExecutePlan: () -> Unit,
-    onCancelExecution: () -> Unit,
-    onApproveStep: () -> Unit,
-    onRejectStep: () -> Unit,
-    onSuggestionSelected: (String) -> Unit
+    viewModel: CommandsViewModel,
+    onOpenPermissionsTab: () -> Unit
 ) {
     val context = LocalContext.current
-    var pendingMicAction by remember { mutableStateOf(false) }
+    val state by viewModel.state.collectAsState()
+    val isAccessibilityConnected by viewModel.isAccessibilityConnected.collectAsState()
+    val plan = (state.uiState as? CommandsUiState.PlanActive)?.plan
+    val isPlanning = state.uiState is CommandsUiState.Planning
+    val errorMessage = (state.uiState as? CommandsUiState.Error)?.message ?: ""
+    val commandText = state.inputText
+    val isRecording = state.isListening
+    val transcriptText = state.partialTranscript
+    val isBusy = isPlanning
+    val isExecutingPlan = state.isExecuting
+    val executionMessage = state.executionTruthReportAr ?: ""
+    val needsApprovalForStep = state.pendingApprovalStep
+    val isPlanComplete = plan?.isComplete == true
+
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted && pendingMicAction) {
-            pendingMicAction = false
-            onMicPressed()
+        if (granted) {
+            viewModel.startVoiceCapture()
+        } else {
+            viewModel.reportMicPermissionDenied()
         }
     }
     val recordPermissionGranted = ContextCompat.checkSelfPermission(
         context,
         Manifest.permission.RECORD_AUDIO
     ) == PackageManager.PERMISSION_GRANTED
+
     val quickSuggestions = listOf(
         "افتح واتساب وأرسل رسالة ترحيب",
         "اضبط منبهاً للساعة 7:30 صباحاً",
         "افتح الإعدادات وابحث عن الشبكة",
         "ذكّرني بعد 10 دقائق بشرب الماء"
     )
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(vertical = 16.dp)
     ) {
         item {
             Card(
@@ -149,247 +149,370 @@ fun CommandsScreen(
                 ),
                 shape = RoundedCornerShape(16.dp)
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 14.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.PendingActions,
-                        contentDescription = null,
-                        modifier = Modifier.size(24.dp),
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "وكيل الهاتف",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
                     )
-                    Column {
-                        Text(
-                            text = "وكيل الأوامر",
-                            style = MaterialTheme.typography.titleLarge,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                        Text(
-                            text = "اكتب أمرك أو تحدث به، وسيحوّله الوكيل إلى خطة خطوات واضحة قبل التنفيذ.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "اطلب بالصوت أو بالكتابة، وسيحوّل الوكيل طلبك إلى خطة واضحة قابلة للمراجعة والتنفيذ خطوة بخطوة.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
                 }
             }
         }
+
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (isAccessibilityConnected) {
+                        "خدمة إمكانية الوصول: متصلة"
+                    } else {
+                        "خدمة إمكانية الوصول: غير مفعّلة"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isAccessibilityConnected) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    }
+                )
+                TextButton(onClick = onOpenPermissionsTab) {
+                    Text(text = "الأذونات", fontSize = 13.sp)
+                }
+            }
+        }
+
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (state.voiceConversationMode) {
+                        "وضع المحادثة الصوتية: مفعّل"
+                    } else {
+                        "وضع المحادثة الصوتية: متوقف"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                TextButton(onClick = { viewModel.toggleVoiceConversationMode() }) {
+                    Text(text = "تبديل", fontSize = 13.sp)
+                }
+            }
+        }
+
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.surface
                 ),
-                shape = RoundedCornerShape(20.dp)
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                shape = RoundedCornerShape(18.dp)
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                        .padding(horizontal = 16.dp, vertical = 20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text(
-                        text = "تحدث أو اكتب أمرك",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = "اضغط على زر الميكروفون للتسجيل ثم اضغط مرة أخرى للإيقاف والإرسال.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(horizontal = 24.dp)
-                    )
-                    val infiniteTransition = rememberInfiniteTransition(label = "micPulse")
-                    val pulseScale by infiniteTransition.animateFloat(
-                        initialValue = 1f,
-                        targetValue = if (isRecording) 1.05f else 1f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(durationMillis = 750),
-                            repeatMode = RepeatMode.Reverse
-                        ),
-                        label = "micScale"
-                    )
-                    Button(
-                        onClick = {
-                            if (recordPermissionGranted) {
-                                onMicPressed()
-                            } else {
-                                pendingMicAction = true
-                                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            }
-                        },
+                    Box(
                         modifier = Modifier
                             .size(72.dp)
-                            .scale(pulseScale),
-                        shape = CircleShape,
-                        contentPadding = PaddingValues(0.dp)
+                            .background(
+                                color = if (isRecording) {
+                                    MaterialTheme.colorScheme.error.copy(alpha = 0.12f)
+                                } else {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                },
+                                shape = CircleShape
+                            )
+                            .border(
+                                width = 1.5.dp,
+                                color = if (isRecording) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+                                },
+                                shape = CircleShape
+                            ),
+                        contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Filled.Mic,
-                            contentDescription = "تسجيل صوتي",
+                            imageVector = if (isRecording) Icons.Filled.Stop else Icons.Filled.Mic,
+                            contentDescription = if (isRecording) "إيقاف التسجيل" else "بدء التسجيل الصوتي",
+                            tint = if (isRecording) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            },
                             modifier = Modifier.size(28.dp)
                         )
                     }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Button(
+                        onClick = {
+                            if (isRecording) {
+                                viewModel.stopVoiceCapture()
+                            } else if (recordPermissionGranted) {
+                                viewModel.startVoiceCapture()
+                            } else {
+                                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            }
+                        },
+                        enabled = !isBusy,
+                        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        )
+                    ) {
+                        Icon(
+                            imageVector = if (isRecording) Icons.Filled.Stop else Icons.Filled.Mic,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (isRecording) {
+                                "إيقاف التسجيل"
+                            } else {
+                                "اضغط للتحدث"
+                            },
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = if (isRecording) "جارٍ التسجيل... ${recordingSeconds} ث" else "اضغط للتحدث",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontSize = 13.sp,
-                        color = if (isRecording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Bold
+                        text = if (isRecording) {
+                            "جارٍ التسجيل... اضغط للإيقاف"
+                        } else {
+                            "اضغط على الزر ثم تحدث بوضوح"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
                     )
                     if (transcriptText.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(6.dp))
                         Text(
                             text = transcriptText,
                             style = MaterialTheme.typography.bodyMedium,
-                            fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurface,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(horizontal = 16.dp)
+                            textAlign = TextAlign.Center
                         )
                     }
                 }
             }
         }
+
         item {
             Text(
-                text = "أو جرّب أحد هذه الاقتراحات:",
-                style = MaterialTheme.typography.bodyMedium,
+                text = "أو جرّب أحد هذه الأوامر:",
+                style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface
             )
         }
+
         item {
-            // FlowRow بدل LazyRow: الاقتراحات تلتف على عدة أسطر وتظهر
-            // كاملة، فلا يُقصّ نص أي شريحة مهما طال.
             FlowRow(
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 quickSuggestions.forEach { suggestion ->
                     FilterChip(
                         selected = false,
-                        onClick = { onSuggestionSelected(suggestion) },
+                        onClick = { viewModel.analyzeAndPlanCommand(suggestion) },
                         label = {
                             Text(
                                 text = suggestion,
-                                style = MaterialTheme.typography.bodySmall,
-                                maxLines = 1
+                                fontSize = 13.sp,
+                                maxLines = 2
                             )
                         },
+                        enabled = true,
                         colors = FilterChipDefaults.filterChipColors(
                             containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                            labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+                            labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
                         ),
                         border = FilterChipDefaults.filterChipBorder(
+                            enabled = true,
+                            selected = false,
                             borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
                         )
                     )
                 }
             }
         }
+
         item {
             OutlinedTextField(
                 value = commandText,
-                onValueChange = onCommandTextChange,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(88.dp),
-                placeholder = {
-                    Text(
-                        text = "مثال: افتح واتساب وأرسل رسالة ترحيب...",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                },
-                shape = RoundedCornerShape(16.dp)
+                onValueChange = { viewModel.updateInputText(it) },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text(text = "اكتب أمرك هنا...") },
+                placeholder = { Text(text = "مثال: افتح واتساب وأرسل رسالة") },
+                singleLine = false,
+                minLines = 2,
+                maxLines = 4,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+                )
             )
         }
+
         item {
             Button(
-                onClick = onSendCommand,
+                onClick = { viewModel.analyzeAndPlanCommand() },
+                enabled = commandText.isNotBlank() && !isBusy && !isExecutingPlan,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp),
-                shape = RoundedCornerShape(14.dp),
-                enabled = commandText.isNotBlank() && !isBusy && !isExecutingPlan,
-                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp)
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                )
             ) {
                 if (isBusy) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(20.dp),
                         strokeWidth = 2.dp,
-                        color = Color.White
+                        color = MaterialTheme.colorScheme.onPrimary
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text(text = "جارٍ تحليل الأمر...", fontSize = 15.sp)
                 } else {
                     Icon(
-                        imageVector = Icons.Filled.Send,
+                        imageVector = Icons.Filled.Add,
                         contentDescription = null,
                         modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text(text = "تحليل وتجهيز الخطة", fontSize = 15.sp)
                 }
-            }
-        }
-        if (errorMessage.isNotBlank()) {
-            item {
                 Text(
-                    text = errorMessage,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error,
-                    fontWeight = FontWeight.Medium
+                    text = if (isBusy) "جارٍ تحليل الأمر..." else "تحليل وتجهيز الخطة",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold
                 )
             }
         }
+
+        if (state.lastSpokenReply.isNotBlank()) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer
+                    ),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Text(
+                            text = "رد الوكيل:",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = state.lastSpokenReply,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    }
+                }
+            }
+        }
+
+        if (errorMessage.isNotBlank()) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    ),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Cancel,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = errorMessage,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+            }
+        }
+
         if (plan != null) {
             item {
                 PlanSection(
                     plan = plan,
-                    planState = planState,
+                    isExecuting = isExecutingPlan,
+                    isPlanComplete = isPlanComplete,
                     executionMessage = executionMessage,
-                    isExecutingPlan = isExecutingPlan,
-                    isCancellingExecution = isCancellingExecution,
-                    onNewPlan = onNewPlan,
-                    onExecutePlan = onExecutePlan,
-                    onCancelExecution = onCancelExecution
+                    onNewPlan = { viewModel.resetToIdle() },
+                    onExecutePlan = { viewModel.executePlanStepByStep() },
+                    onCancelExecution = { viewModel.cancelActivePlan() }
                 )
             }
         }
     }
+
     needsApprovalForStep?.let { step ->
         AlertDialog(
-            onDismissRequest = {},
+            onDismissRequest = { viewModel.resolveApproval(false) },
             title = {
                 Text(
-                    text = "تأكيد الخطوة",
-                    style = MaterialTheme.typography.titleLarge
+                    text = "موافقة مطلوبة",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
                 )
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column {
                     Text(
                         text = step.titleAr,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold
                     )
+                    Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = step.descriptionAr,
                         style = MaterialTheme.typography.bodyMedium
                     )
                     if (step.safetyReasonAr.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = step.safetyReasonAr,
-                            style = MaterialTheme.typography.bodyMedium,
+                            text = "السبب: ${step.safetyReasonAr}",
+                            style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error
                         )
                     }
@@ -397,18 +520,18 @@ fun CommandsScreen(
             },
             confirmButton = {
                 Button(
-                    onClick = onApproveStep,
+                    onClick = { viewModel.resolveApproval(true) },
                     modifier = Modifier.height(48.dp)
                 ) {
-                    Text(text = "تنفيذ")
+                    Text(text = "تنفيذ", fontSize = 14.sp)
                 }
             },
             dismissButton = {
-                TextButton(
-                    onClick = onRejectStep,
+                OutlinedButton(
+                    onClick = { viewModel.resolveApproval(false) },
                     modifier = Modifier.height(48.dp)
                 ) {
-                    Text(text = "تعديل الخطة")
+                    Text(text = "إلغاء", fontSize = 14.sp)
                 }
             }
         )
@@ -418,72 +541,91 @@ fun CommandsScreen(
 @Composable
 private fun PlanSection(
     plan: AgentPlan,
-    planState: PlanState,
+    isExecuting: Boolean,
+    isPlanComplete: Boolean,
     executionMessage: String,
-    isExecutingPlan: Boolean,
-    isCancellingExecution: Boolean,
     onNewPlan: () -> Unit,
     onExecutePlan: () -> Unit,
     onCancelExecution: () -> Unit
 ) {
-    val isExecuting = isExecutingPlan || planState == PlanState.EXECUTING
-    val planSteps = plan.steps
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
         ),
-        shape = RoundedCornerShape(18.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        shape = RoundedCornerShape(16.dp)
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = "خطة التنفيذ",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold
-            )
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "خطة التنفيذ",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "${plan.steps.size} خطوات",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = plan.understandingSummaryAr,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Spacer(modifier = Modifier.height(12.dp))
+
             AnimatedVisibility(visible = isExecuting) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                        Text(
-                            text = "جارٍ تنفيذ الخطوات...",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                    if (executionMessage.isNotBlank()) {
-                        Text(
-                            text = executionMessage,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "جارٍ تنفيذ الخطوات...",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
                 }
             }
-            planSteps.forEach { step ->
-                StepRow(
-                    step = step,
-                    isExecuting = isExecuting
+            if (executionMessage.isNotBlank()) {
+                Text(
+                    text = executionMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 4.dp)
                 )
             }
+
+            plan.steps.forEach { step ->
+                StepRow(step = step, isExecuting = isExecuting)
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
             Button(
                 onClick = onExecutePlan,
+                enabled = !isExecuting,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp),
-                enabled = !isExecuting,
-                shape = RoundedCornerShape(12.dp)
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                )
             ) {
                 Icon(
                     imageVector = Icons.Filled.PlayArrow,
@@ -492,28 +634,31 @@ private fun PlanSection(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = if (planState == PlanState.COMPLETED) "إعادة تنفيذ الخطة" else "تنفيذ الخطة",
-                    fontSize = 15.sp
+                    text = if (isPlanComplete) "إعادة تنفيذ الخطة" else "تنفيذ الخطة",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold
                 )
             }
+
+            Spacer(modifier = Modifier.height(8.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 OutlinedButton(
                     onClick = onNewPlan,
+                    enabled = !isExecuting,
                     modifier = Modifier
                         .weight(1f)
                         .height(48.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    enabled = !isExecuting
+                    contentPadding = PaddingValues(horizontal = 12.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Filled.Refresh,
                         contentDescription = null,
                         modifier = Modifier.size(18.dp)
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(text = "خطة جديدة", fontSize = 14.sp)
                 }
                 if (isExecuting) {
@@ -522,19 +667,18 @@ private fun PlanSection(
                         modifier = Modifier
                             .weight(1f)
                             .height(48.dp),
-                        shape = RoundedCornerShape(12.dp),
-                        enabled = !isCancellingExecution
+                        contentPadding = PaddingValues(horizontal = 12.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
                     ) {
                         Icon(
                             imageVector = Icons.Filled.Cancel,
                             contentDescription = null,
                             modifier = Modifier.size(18.dp)
                         )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = if (isCancellingExecution) "جارٍ الإيقاف..." else "إلغاء التنفيذ",
-                            fontSize = 14.sp
-                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(text = "إلغاء التنفيذ", fontSize = 14.sp)
                     }
                 }
             }
@@ -544,93 +688,125 @@ private fun PlanSection(
 
 @Composable
 private fun StepRow(step: AgentPlanStep, isExecuting: Boolean) {
-    val isDone = step.executionState == StepExecutionState.COMPLETED
-    val isCurrent = isExecuting && step.executionState == StepExecutionState.RUNNING
-    val isFailed = step.executionState == StepExecutionState.FAILED
+    val isDone = step.status == StepStatus.COMPLETED
+    val isCurrent = isExecuting && step.status == StepStatus.RUNNING
+    val isFailed = step.status == StepStatus.FAILED
     val stepIcon = when (step.actionType) {
         StepActionType.OPEN_APP -> Icons.Filled.Add
         StepActionType.SEARCH_IN_APP -> Icons.Filled.Add
         StepActionType.SET_ALARM -> Icons.Outlined.Schedule
         StepActionType.SET_REMINDER -> Icons.Outlined.Schedule
         StepActionType.SEND_MESSAGE -> Icons.Filled.Send
-        StepActionType.OPEN_SETTINGS -> Icons.Filled.Settings
-        StepActionType.CAPTURE_SCREEN -> Icons.Filled.Add
-        StepActionType.SPEAK_ANSWER -> Icons.Filled.Mic
-        StepActionType.OTHER -> Icons.Filled.Add
         StepActionType.CHANGE_SETTING -> Icons.Filled.Settings
-        StepActionType.CLOSE_APP -> Icons.Filled.Delete
+        StepActionType.TAP_ELEMENT -> Icons.Filled.Add
+        StepActionType.INPUT_TEXT -> Icons.Filled.Add
+        StepActionType.SCROLL_SCREEN -> Icons.Outlined.Autorenew
+        StepActionType.READ_SCREEN_AND_SUMMARIZE -> Icons.Outlined.PendingActions
+        StepActionType.WAIT_AND_VERIFY -> Icons.Outlined.Autorenew
+        StepActionType.SPEAK_ANSWER -> Icons.Filled.Mic
     }
-    Card(
+
+    Surface(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = when {
-                isFailed -> MaterialTheme.colorScheme.errorContainer
-                isDone -> MaterialTheme.colorScheme.primaryContainer
-                isCurrent -> MaterialTheme.colorScheme.secondaryContainer
-                else -> MaterialTheme.colorScheme.surfaceVariant
-            }
-        ),
-        shape = RoundedCornerShape(12.dp)
+        shape = RoundedCornerShape(12.dp),
+        color = when {
+            isFailed -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
+            isDone -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+            isCurrent -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f)
+            else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+        }
     ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.Top
         ) {
-            Box(
-                modifier = Modifier
-                    .size(32.dp)
-                    .clip(CircleShape)
-                    .background(
-                        when {
-                            isFailed -> MaterialTheme.colorScheme.error
-                            isDone -> MaterialTheme.colorScheme.primary
-                            isCurrent -> MaterialTheme.colorScheme.secondary
-                            else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
-                        }
-                    ),
-                contentAlignment = Alignment.Center
+            Surface(
+                shape = CircleShape,
+                color = when {
+                    isFailed -> MaterialTheme.colorScheme.error
+                    isDone -> MaterialTheme.colorScheme.primary
+                    isCurrent -> MaterialTheme.colorScheme.tertiary
+                    else -> MaterialTheme.colorScheme.outline
+                }
             ) {
-                Icon(
-                    imageVector = if (isDone) Icons.Filled.CheckCircle else stepIcon,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp),
-                    tint = Color.White
-                )
+                Box(
+                    modifier = Modifier.size(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isDone) {
+                        Icon(
+                            imageVector = Icons.Filled.CheckCircle,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    } else if (isFailed) {
+                        Icon(
+                            imageVector = Icons.Filled.Cancel,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onError,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = stepIcon,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
             }
+            Spacer(modifier = Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "${step.stepNumber}. ${step.titleAr}",
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface
                 )
+                Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = step.descriptionAr,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "الحالة: ${step.status.labelAr}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isFailed) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
                 if (step.targetAppName.isNotBlank() || step.targetQueryOrText.isNotBlank()) {
-                    Text(
-                        text = buildString {
-                            if (step.targetAppName.isNotBlank()) append("التطبيق: ${step.targetAppName}")
-                            if (step.targetQueryOrText.isNotBlank()) {
-                                if (isNotEmpty()) append(" | ")
-                                append(step.targetQueryOrText)
-                            }
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        AppImagePlaceholder(
+                            packageName = "",
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = listOf(step.targetAppName, step.targetQueryOrText)
+                                .filter { it.isNotBlank() }
+                                .joinToString(" — "),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
                 if (step.requiresApproval) {
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "تتطلب موافقتك قبل التنفيذ",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.error
                     )
                 }
             }
@@ -639,24 +815,20 @@ private fun StepRow(step: AgentPlanStep, isExecuting: Boolean) {
 }
 
 @Composable
-fun AppImagePlaceholder(modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .size(48.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.primaryContainer)
-            .border(
-                width = 1.dp,
-                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
-                shape = RoundedCornerShape(12.dp)
-            ),
-        contentAlignment = Alignment.Center
+fun AppImagePlaceholder(
+    packageName: String,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.size(28.dp),
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant
     ) {
         Image(
             painter = painterResource(id = R.drawable.ic_launcher_foreground),
-            contentDescription = null,
-            modifier = Modifier.size(32.dp),
-            contentScale = ContentScale.Fit
+            contentDescription = packageName.ifBlank { "أيقونة التطبيق" },
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize()
         )
     }
 }
