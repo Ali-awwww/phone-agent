@@ -1,92 +1,96 @@
 name: Release APK
-
 on:
   workflow_dispatch:
     inputs:
       tag:
         description: "Release tag (e.g. v1.0.1)"
         required: true
-        default: "v1.0.1"
-
+        default: "v1.0.3"
 permissions:
   contents: write
-
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: "temurin"
           java-version: "17"
-
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 9.3.1
-
-      - name: Cache Robolectric android-all artifacts
-        uses: actions/cache@v4
-        with:
-          path: ~/.m2/repository/org/robolectric
-          key: robolectric-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
-          restore-keys: |
-            robolectric-${{ runner.os }}-
-
-      - name: Decode release keystore
-        run: |
-          if [ -z "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
-            echo "::error::Missing GitHub secret ANDROID_KEYSTORE_BASE64."
-            exit 1
-          fi
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > "${{ github.workspace }}/my-upload-key.jks"
-          ls -l "${{ github.workspace }}/my-upload-key.jks"
-
-      - name: Build signed Release APK
+      - name: Create release keystore from secret
         env:
-          KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
-          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > my-upload-key.jks
+          ls -lh my-upload-key.jks
+      - name: Set up environment
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          for attempt in 1 2 3; do
-            echo "=== Build attempt $attempt ==="
-            set +e
-            gradle assembleRelease --stacktrace 2>&1 | tee "build-$attempt.log"
-            status=${PIPESTATUS[0]}
-            set -e
-            if [ "$status" -eq 0 ]; then exit 0; fi
-            if grep -q "Failed to fetch maven artifact" "build-$attempt.log"; then
-              echo "Maven fetch failure detected, retrying..."
-              sleep 10
-              continue
-            fi
-            echo "Build failed for a non-Maven reason; see the log above."
-            exit "$status"
-          done
-          echo "Build failed after 3 attempts."
-          exit 1
-
+          printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY" > .env
+          printf 'STORE_PASSWORD=%s\n' "$STORE_PASSWORD" >> .env
+          printf 'KEY_ALIAS=%s\n' "$KEY_ALIAS" >> .env
+          printf 'KEY_PASSWORD=%s\n' "$KEY_PASSWORD" >> .env
+          cat > local.properties <<EOF
+          GEMINI_API_KEY=$GEMINI_API_KEY
+          STORE_PASSWORD=$STORE_PASSWORD
+          KEY_ALIAS=$KEY_ALIAS
+          KEY_PASSWORD=$KEY_PASSWORD
+          EOF
+      - name: Assemble release APK
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: ./gradlew assembleRelease --stacktrace
       - name: Show APK and print signing certificate fingerprints
         run: |
-          ls -lh app/build/outputs/apk/release/app-release.apk
-          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)
-          echo "Using apksigner: $APKSIGNER"
-          "$APKSIGNER" verify --print-certs --verbose app/build/outputs/apk/release/app-release.apk
-          sha256sum app/build/outputs/apk/release/app-release.apk
-
-      - name: Create GitHub Release with the signed APK
+          ls -lh app/build/outputs/apk/release/
+          echo "--- apksigner verify ---"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk
+      - name: Create GitHub release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" app/build/outputs/apk/release/app-release.apk --clobber
+            gh release edit "$TAG" --title "وكيل الهاتف $TAG" --notes "## وكيل الهاتف v1.0.3
+
+- تصغير أزرار شاشة الأوامر: زر الميكروفون 72dp بدل 104dp، وزر «تحليل وتجهيز الخطة» وأزرار التنفيذ 48dp.
+- اقتراحات كاملة تظهر دون قص (تلتف على عدة أسطر): فتح واتساب وإرسال ترحيب، منبه 7:30 صباحاً، فتح الإعدادات والبحث عن الشبكة، تذكير بشرب الماء.
+- إصلاح خطأ App Check: تحديث قسري لرمز Play Integrity بعد التبديل من reCAPTCHA، وإعادة محاولة واحدة لاستدعاءات Gemini عند رفض الرمز.
+- ملاحظة: ليقبل Play Integrity الرمز يجب تسجيل بصمتي SHA-1 وSHA-256 لمفتاح توقيع الإصدار في Firebase (إعدادات المشروع ← تطبيق أندرويد).
+
+للتثبيت: حمّل app-release.apk وثبّته على الهاتف.
+يُفضَّل إزالة النسخة السابقة أولاً ثم تثبيت هذه النسخة.
+
+البصمة:
+- SHA-1: سيطبعها سجل البناء (apksigner)
+- SHA-256: سيطبعها سجل البناء (apksigner)"
           else
-            gh release create "$TAG" app/build/outputs/apk/release/app-release.apk --title "$TAG" --notes "إصلاح خطأ Gemini: تصحيح مفتاح Firebase API في google-services.json. ثبّت هذا الإصدار بدلاً من v1.0."
+            gh release create "$TAG" app/build/outputs/apk/release/app-release.apk --title "وكيل الهاتف $TAG" --notes "## وكيل الهاتف v1.0.3
+
+- تصغير أزرار شاشة الأوامر: زر الميكروفون 72dp بدل 104dp، وزر «تحليل وتجهيز الخطة» وأزرار التنفيذ 48dp.
+- اقتراحات كاملة تظهر دون قص (تلتف على عدة أسطر): فتح واتساب وإرسال ترحيب، منبه 7:30 صباحاً، فتح الإعدادات والبحث عن الشبكة، تذكير بشرب الماء.
+- إصلاح خطأ App Check: تحديث قسري لرمز Play Integrity بعد التبديل من reCAPTCHA، وإعادة محاولة واحدة لاستدعاءات Gemini عند رفض الرمز.
+- ملاحظة: ليقبل Play Integrity الرمز يجب تسجيل بصمتي SHA-1 وSHA-256 لمفتاح توقيع الإصدار في Firebase (إعدادات المشروع ← تطبيق أندرويد).
+
+للتثبيت: حمّل app-release.apk وثبّته على الهاتف.
+يُفضَّل إزالة النسخة السابقة أولاً ثم تثبيت هذه النسخة.
+
+البصمة:
+- SHA-1: سيطبعها سجل البناء (apksigner)
+- SHA-256: سيطبعها سجل البناء (apksigner)"
           fi
