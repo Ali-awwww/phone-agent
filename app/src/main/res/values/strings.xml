@@ -1,4 +1,5 @@
 <resources>
+   <string name="recaptcha_site_key">6LfnPzAuAAAAAMjThfvKntvlx2wx_PvKYePK9Dak</string> 
     <string name="app_name">وكيل الهاتف</string>
     <string name="accessibility_service_label">وكيل الهاتف - المساعد الذكي</string>
     <string name="accessibility_service_summary">يسمح لوكيل الهاتف بقراءة محتوى الشاشة والضغط على الأزرار نيابة عنك بموافقتك.</string>
