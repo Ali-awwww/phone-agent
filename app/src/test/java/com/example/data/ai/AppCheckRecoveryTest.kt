@@ -409,10 +409,9 @@ class AppCheckRecoveryTest {
     }
 
     @Test
-    fun `retries 503 overload with exponential backoff and status notice then succeeds on primary model`() = runBlocking {
+    fun `Lite chain tries gemini-3-5-flash-lite then gemini-3-8-flash then gemini-4-hydrogen with 1s and 2s delays`() = runBlocking {
         val events = mutableListOf<String>()
         val statusNotices = mutableListOf<String>()
-        var primaryCalls = 0
 
         val fakeAppCheck = object : AppCheckTokenClient {
             override suspend fun getToken(forceRefresh: Boolean): String = "valid-token"
@@ -424,43 +423,57 @@ class AppCheckRecoveryTest {
             override suspend fun generateAudioPlanJson(audioBytes: ByteArray, mimeType: String, prompt: String) = ""
             override suspend fun generateVerificationJson(prompt: String) = "{}"
             override suspend fun generateCategorizationJson(prompt: String) = "{}"
+            override suspend fun generateLiteGeneralArabicText(prompt: String): String {
+                events.add(FALLBACK_LITE_GEMINI_MODEL)
+                throw RuntimeException("503 UNAVAILABLE: This model is currently experiencing high demand.")
+            }
+
             override suspend fun generateGeneralArabicText(prompt: String): String {
-                primaryCalls++
-                events.add("primary($primaryCalls)")
-                if (primaryCalls <= 2) {
-                    throw RuntimeException("503 UNAVAILABLE: This model is currently experiencing high demand. Please try again later.")
-                }
-                return "أهلاً بك! أنا جاهز لمساعدتك."
+                events.add(PRIMARY_GEMINI_MODEL)
+                throw RuntimeException("503 UNAVAILABLE: high demand. Please try again later.")
+            }
+
+            override suspend fun generateGeneralArabicTextThird(prompt: String): String {
+                events.add(THIRD_FALLBACK_GEMINI_MODEL)
+                return "رد مستقر من الهيدروجين"
             }
         }
 
         val repository = GeminiRepository(
             appCheckClient = fakeAppCheck,
             modelClient = fakeModelClient,
-            overloadRetryDelaysMs = listOf(100L, 200L, 400L),
+            overloadRetryDelaysMs = DEFAULT_OVERLOAD_BACKOFF_MS,
             delayFn = { ms -> events.add("delay($ms)") }
         )
 
-        val reply = repository.conversationalReply(
-            userMessage = "مرحبا",
-            contextSummary = "سياق",
-            onStatusUpdate = { msg -> statusNotices.add(msg) }
+        val meta = repository.conversationalReplyWithMeta(
+            userMessage = "ما هي عاصمة المغرب؟",
+            contextSummary = "عام",
+            onStatusUpdate = { msg -> statusNotices.add(msg) },
+            modelTier = ModelRouteTier.LITE
         )
 
-        assertEquals("أهلاً بك! أنا جاهز لمساعدتك.", reply)
-        assertEquals(3, primaryCalls)
-        assertEquals(listOf(MSG_MODEL_BUSY_RETRYING_AR, MSG_MODEL_BUSY_RETRYING_AR), statusNotices)
+        assertEquals(listOf("gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-4-hydrogen"), getModelChainForTier(ModelRouteTier.LITE))
+        assertEquals(THIRD_FALLBACK_GEMINI_MODEL, meta.modelUsed)
+        assertTrue(meta.usedFallback)
+        assertEquals("رد مستقر من الهيدروجين", meta.value)
+        assertEquals(listOf("النموذج مشغول الآن، أعيد المحاولة..."), statusNotices)
         assertEquals(
-            listOf("primary(1)", "delay(100)", "primary(2)", "delay(200)", "primary(3)"),
+            listOf(
+                "gemini-3.5-flash-lite",
+                "delay(1000)",
+                "gemini-3.8-flash",
+                "delay(2000)",
+                "gemini-4-hydrogen"
+            ),
             events
         )
     }
 
     @Test
-    fun `falls back to lighter gemini-3-5-flash-lite model when primary 503 retries are exhausted`() = runBlocking {
+    fun `Flash chain tries gemini-3-8-flash then gemini-3-5-flash-lite then gemini-4-hydrogen with 1s and 2s delays`() = runBlocking {
         val events = mutableListOf<String>()
-        var primaryCalls = 0
-        var fallbackCalls = 0
+        val statusNotices = mutableListOf<String>()
 
         val fakeAppCheck = object : AppCheckTokenClient {
             override suspend fun getToken(forceRefresh: Boolean): String = "valid-token"
@@ -473,50 +486,121 @@ class AppCheckRecoveryTest {
             override suspend fun generateVerificationJson(prompt: String) = "{}"
             override suspend fun generateCategorizationJson(prompt: String) = "{}"
             override suspend fun generateGeneralArabicText(prompt: String): String {
-                primaryCalls++
-                events.add("primary($primaryCalls)")
+                events.add(PRIMARY_GEMINI_MODEL)
                 throw RuntimeException("503 overloaded: high demand")
             }
 
-            override suspend fun pingModelTest(): String {
-                primaryCalls++
-                events.add("primaryPing($primaryCalls)")
-                throw RuntimeException("503 overloaded: high demand")
+            override suspend fun generateLiteGeneralArabicText(prompt: String): String {
+                events.add(FALLBACK_LITE_GEMINI_MODEL)
+                throw RuntimeException("503 UNAVAILABLE")
             }
 
-            override suspend fun pingModelTestFallback(): String {
-                fallbackCalls++
-                events.add("fallbackPing($fallbackCalls)")
-                return "متصل"
+            override suspend fun generateGeneralArabicTextThird(prompt: String): String {
+                events.add(THIRD_FALLBACK_GEMINI_MODEL)
+                return "خطة تنفيذ المهمة جاهزة من الهيدروجين"
             }
         }
 
         val repository = GeminiRepository(
             appCheckClient = fakeAppCheck,
             modelClient = fakeModelClient,
-            overloadRetryDelaysMs = listOf(50L, 100L, 200L),
+            overloadRetryDelaysMs = DEFAULT_OVERLOAD_BACKOFF_MS,
             delayFn = { ms -> events.add("delay($ms)") }
         )
 
-        val (ok, details) = repository.pingModelTest()
+        val meta = repository.conversationalReplyWithMeta(
+            userMessage = "افتح الإعدادات الآن",
+            contextSummary = "هاتف",
+            onStatusUpdate = { msg -> statusNotices.add(msg) },
+            modelTier = ModelRouteTier.FLASH
+        )
 
-        assertTrue(ok)
-        assertTrue(details.contains(FALLBACK_LITE_GEMINI_MODEL))
-        assertEquals(4, primaryCalls)
-        assertEquals(1, fallbackCalls)
+        assertEquals(listOf("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen"), getModelChainForTier(ModelRouteTier.FLASH))
+        assertEquals(ModelRouteTier.FLASH, meta.tier)
+        assertEquals(THIRD_FALLBACK_GEMINI_MODEL, meta.modelUsed)
+        assertTrue(meta.usedFallback)
+        assertEquals("خطة تنفيذ المهمة جاهزة من الهيدروجين", meta.value)
+        assertEquals(listOf("النموذج مشغول الآن، أعيد المحاولة..."), statusNotices)
         assertEquals(
             listOf(
-                "primaryPing(1)",
-                "delay(50)",
-                "primaryPing(2)",
-                "delay(100)",
-                "primaryPing(3)",
-                "delay(200)",
-                "primaryPing(4)",
-                "fallbackPing(1)"
+                "gemini-3.8-flash",
+                "delay(1000)",
+                "gemini-3.5-flash-lite",
+                "delay(2000)",
+                "gemini-4-hydrogen"
             ),
             events
         )
+    }
+
+    @Test
+    fun `503 across all three models ends cleanly with single short Arabic error and never uses blocked models`() = runBlocking {
+        val allModels = (getModelChainForTier(ModelRouteTier.LITE) + getModelChainForTier(ModelRouteTier.FLASH)).toSet()
+        val forbiddenModels = setOf(
+            "gemini-4-neon",
+            "gemini-4-carbon",
+            "gemini-4-argon",
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite"
+        )
+        assertTrue(allModels.intersect(forbiddenModels).isEmpty())
+        assertEquals(setOf("gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-4-hydrogen"), allModels)
+
+        val fakeAppCheck = object : AppCheckTokenClient {
+            override suspend fun getToken(forceRefresh: Boolean): String = "valid-token"
+            override suspend fun clearStoredTokens() {}
+        }
+
+        val tried = mutableListOf<String>()
+        val statusNotices = mutableListOf<String>()
+        val fakeModelClient = object : GeminiModelClient {
+            override suspend fun generatePlanJson(prompt: String) = ""
+            override suspend fun generateAudioPlanJson(audioBytes: ByteArray, mimeType: String, prompt: String) = ""
+            override suspend fun generateVerificationJson(prompt: String) = "{}"
+            override suspend fun generateCategorizationJson(prompt: String) = "{}"
+            override suspend fun generateGeneralArabicText(prompt: String): String {
+                tried.add(PRIMARY_GEMINI_MODEL)
+                throw RuntimeException("503 UNAVAILABLE: high demand")
+            }
+
+            override suspend fun pingModelTest(): String {
+                tried.add(PRIMARY_GEMINI_MODEL)
+                throw RuntimeException("503 UNAVAILABLE: high demand")
+            }
+
+            override suspend fun pingModelTestFallback(): String {
+                tried.add(FALLBACK_LITE_GEMINI_MODEL)
+                throw RuntimeException("503 UNAVAILABLE: high demand")
+            }
+
+            override suspend fun pingModelTestThird(): String {
+                tried.add(THIRD_FALLBACK_GEMINI_MODEL)
+                throw RuntimeException("503 UNAVAILABLE: high demand")
+            }
+        }
+
+        val repository = GeminiRepository(
+            appCheckClient = fakeAppCheck,
+            modelClient = fakeModelClient,
+            overloadRetryDelaysMs = listOf(10L, 20L),
+            delayFn = {}
+        )
+
+        try {
+            repository.pingModelTest(onStatusUpdate = { statusNotices.add(it) })
+            fail("Expected 503 exception after all 3 models fail")
+        } catch (e: Exception) {
+            val classified = classifyModelError(e)
+            assertEquals(DisconnectionCategory.MODEL_BUSY, classified.category)
+            assertFalse(classified.explanationAr.contains("\n"))
+            assertTrue(classified.explanationAr.contains("503"))
+        }
+
+        assertEquals(listOf("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-hydrogen"), tried)
+        assertEquals(listOf(MSG_MODEL_BUSY_RETRYING_AR), statusNotices)
     }
 
     @Test
@@ -551,7 +635,7 @@ class AppCheckRecoveryTest {
         val repository = GeminiRepository(
             appCheckClient = fakeAppCheck,
             modelClient = fakeModelClient,
-            overloadRetryDelaysMs = listOf(10L),
+            overloadRetryDelaysMs = listOf(10L, 20L),
             delayFn = {}
         )
 

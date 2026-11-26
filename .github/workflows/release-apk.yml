@@ -76,7 +76,7 @@ jobs:
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" app/build/outputs/apk/release/app-release.apk --clobber
-            gh release edit "$TAG" --title "وكيل الهاتف $TAG" --notes "## وكيل الهاتف v1.0.3
+            gh release edit "$TAG" --title "وكيل الهاتف $TAG" --notes "## وكيل الهاتف v1.0.6
 
             - تصغير أزرار شاشة الأوامر: زر الميكروفون 72dp بدل 104dp، وزر تحليل وتجهيز الخطة وأزرار التنفيذ 48dp.
             - اقتراحات كاملة تظهر دون قص (تلتف على عدة أسطر): فتح واتساب وإرسال ترحيب، منبه 7:30 صباحا، فتح الإعدادات والبحث عن الشبكة، تذكير بشرب الماء.
@@ -90,7 +90,7 @@ jobs:
             - SHA-1: سيطبعها سجل البناء (apksigner)
             - SHA-256: سيطبعها سجل البناء (apksigner)"
           else
-            gh release create "$TAG" app/build/outputs/apk/release/app-release.apk --title "وكيل الهاتف $TAG" --notes "## وكيل الهاتف v1.0.3
+            gh release create "$TAG" app/build/outputs/apk/release/app-release.apk --title "وكيل الهاتف $TAG" --notes "## وكيل الهاتف v1.0.6
 
             - تصغير أزرار شاشة الأوامر: زر الميكروفون 72dp بدل 104dp، وزر تحليل وتجهيز الخطة وأزرار التنفيذ 48dp.
             - اقتراحات كاملة تظهر دون قص (تلتف على عدة أسطر): فتح واتساب وإرسال ترحيب، منبه 7:30 صباحا، فتح الإعدادات والبحث عن الشبكة، تذكير بشرب الماء.

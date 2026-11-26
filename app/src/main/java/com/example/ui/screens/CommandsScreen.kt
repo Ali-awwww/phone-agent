@@ -37,7 +37,6 @@ import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.AccessibilityNew
-import androidx.compose.material.icons.rounded.Cancel
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.CloudOff
@@ -49,9 +48,6 @@ import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Mic
-import androidx.compose.material.icons.rounded.PanTool
-import androidx.compose.material.icons.rounded.Pause
-import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.SportsEsports
 import androidx.compose.material.icons.rounded.Stop
@@ -91,6 +87,8 @@ import com.example.BuildConfig
 import com.example.data.local.ChatMessageEntity
 import com.example.data.local.ChatMessageType
 import com.example.policy.AgentPromptRules
+import com.example.ui.components.ChatLiveExecutionActions
+import com.example.ui.components.ChatLiveExecutionBubble
 import com.example.ui.components.ChatMessageBubble
 import com.example.ui.components.CyberPanelCard
 import com.example.ui.components.CyberPlanCard
@@ -152,7 +150,9 @@ fun CommandsScreen(
     val isRecording = state.isListening
     val isAnyTaskRunning = state.isAnyTaskRunning
     val canPauseOrTakeOver = state.isExecuting || state.isGameplayRunning
-    val showTaskControlStrip = isAnyTaskRunning || (plan != null && !plan.isComplete && !plan.isCancelled)
+    val showInChatExecutionBubble = isAnyTaskRunning ||
+        state.isPaused ||
+        (state.statusNoticeAr.isNotBlank() && state.modelConnectionStatus !is ModelConnectionStatus.Checking)
     val listState = rememberLazyListState()
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -170,9 +170,12 @@ fun CommandsScreen(
         Manifest.permission.RECORD_AUDIO
     ) == PackageManager.PERMISSION_GRANTED
 
-    LaunchedEffect(displayMessages.size, plan != null) {
+    LaunchedEffect(displayMessages.size, plan != null, showInChatExecutionBubble) {
         val headerCount = if (displayMessages.isEmpty()) 2 else 1
-        val totalItems = headerCount + displayMessages.size + (if (plan != null) 1 else 0)
+        val totalItems = headerCount +
+            displayMessages.size +
+            (if (plan != null) 1 else 0) +
+            (if (showInChatExecutionBubble) 1 else 0)
         if (totalItems > 0) {
             listState.animateScrollToItem(totalItems - 1)
         }
@@ -349,198 +352,7 @@ fun CommandsScreen(
                 )
             }
 
-            // شريط حالة مختصر أثناء إعادة المحاولة التلقائية عند انشغال النموذج (خارج وضع شريط التحكم)
-            AnimatedVisibility(
-                visible = state.statusNoticeAr.isNotBlank() &&
-                    !showTaskControlStrip &&
-                    state.modelConnectionStatus !is ModelConnectionStatus.Checking
-            ) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    color = CyberSurfaceNavy,
-                    border = BorderStroke(1.dp, CyberElectricCyan.copy(alpha = 0.65f))
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp,
-                            color = CyberElectricCyan
-                        )
-                        Text(
-                            text = state.statusNoticeAr,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = CyberElectricCyan,
-                            softWrap = true
-                        )
-                    }
-                }
-            }
-
-            // 3) شريط التحكم الفوري بالوكيل داخل حاوية مرتبة عند تشغيل مهمة أو لعبة
-            AnimatedVisibility(visible = showTaskControlStrip) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
-                    color = if (state.isPaused) StatusPendingContainer else StatusCancelledContainer,
-                    border = BorderStroke(
-                        1.5.dp,
-                        if (state.isPaused) StatusPending else StatusCancelled
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            if (isAnyTaskRunning && !state.isPaused) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    strokeWidth = 2.dp,
-                                    color = CyberElectricCyan
-                                )
-                            }
-                            Text(
-                                text = state.statusNoticeAr.ifBlank {
-                                    if (state.isPaused) "المهمة متوقفة مؤقتاً — بانتظارك"
-                                    else AgentPromptRules.WAIT_THINKING_NOTICE_AR
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = CyberTextPrimary,
-                                softWrap = true
-                            )
-                        }
-
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(12.dp),
-                            color = CyberBgDeep.copy(alpha = 0.55f),
-                            border = BorderStroke(1.dp, CyberBorderGlow.copy(alpha = 0.5f))
-                        ) {
-                            FlowRow(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(6.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Button(
-                                    onClick = { viewModel.stopCurrentTask() },
-                                    modifier = Modifier
-                                        .height(48.dp)
-                                        .testTag("stop_active_task_button"),
-                                    shape = MaterialTheme.shapes.small,
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = StatusCancelled,
-                                        contentColor = Color.White
-                                    ),
-                                    contentPadding = PaddingValues(horizontal = 14.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Stop,
-                                        contentDescription = "إيقاف المهمة فوراً",
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(Modifier.width(4.dp))
-                                    Text(text = "إيقاف", fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
-                                }
-
-                                if (canPauseOrTakeOver) {
-                                    Button(
-                                        onClick = { viewModel.togglePauseResume() },
-                                        modifier = Modifier
-                                            .height(48.dp)
-                                            .testTag("pause_resume_task_button"),
-                                        shape = MaterialTheme.shapes.small,
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = if (state.isPaused) StatusSuccess else CyberElectricBlue,
-                                            contentColor = Color.White
-                                        ),
-                                        contentPadding = PaddingValues(horizontal = 14.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = if (state.isPaused) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
-                                            contentDescription = if (state.isPaused) "استئناف" else "إيقاف مؤقت",
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                        Spacer(Modifier.width(4.dp))
-                                        Text(
-                                            text = if (state.isPaused) "استئناف" else "إيقاف مؤقت",
-                                            fontWeight = FontWeight.Bold,
-                                            maxLines = 1,
-                                            softWrap = false
-                                        )
-                                    }
-
-                                    OutlinedButton(
-                                        onClick = { viewModel.handOverControlToUser() },
-                                        modifier = Modifier
-                                            .height(48.dp)
-                                            .testTag("user_takeover_button"),
-                                        shape = MaterialTheme.shapes.small,
-                                        border = BorderStroke(1.dp, CyberElectricCyan),
-                                        contentPadding = PaddingValues(horizontal = 12.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.PanTool,
-                                            contentDescription = "أكمل بنفسي",
-                                            tint = CyberElectricCyan,
-                                            modifier = Modifier.size(17.dp)
-                                        )
-                                        Spacer(Modifier.width(4.dp))
-                                        Text(
-                                            text = "أكمل بنفسي",
-                                            color = CyberElectricCyan,
-                                            maxLines = 1,
-                                            softWrap = false
-                                        )
-                                    }
-                                }
-
-                                OutlinedButton(
-                                    onClick = { viewModel.cancelCurrentTask() },
-                                    modifier = Modifier
-                                        .height(48.dp)
-                                        .testTag("cancel_current_task_button"),
-                                    shape = MaterialTheme.shapes.small,
-                                    border = BorderStroke(1.dp, StatusCancelled),
-                                    contentPadding = PaddingValues(horizontal = 12.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Cancel,
-                                        contentDescription = "إلغاء المهمة الحالية",
-                                        tint = StatusCancelled,
-                                        modifier = Modifier.size(17.dp)
-                                    )
-                                    Spacer(Modifier.width(4.dp))
-                                    Text(
-                                        text = "إلغاء المهمة",
-                                        color = StatusCancelled,
-                                        maxLines = 1,
-                                        softWrap = false
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 4) منطقة فقاعات الدردشة + الخطة النشطة بتباعد واسع ومنع أي قصّ أو تداخل
+            // 3) منطقة فقاعات الدردشة + الخطة النشطة + فقاعة التنفيذ الحي ضمن التدفق الطبيعي
             LazyColumn(
                 state = listState,
                 modifier = Modifier
@@ -605,6 +417,28 @@ fun CommandsScreen(
                             onNewPlan = { viewModel.resetToIdle() },
                             onExecutePlan = { viewModel.executePlanStepByStep() },
                             onCancelExecution = { viewModel.cancelCurrentTask() }
+                        )
+                    }
+                }
+
+                if (showInChatExecutionBubble) {
+                    item(key = "live_execution_bubble") {
+                        val liveActions = remember(viewModel) {
+                            ChatLiveExecutionActions(
+                                onStop = { viewModel.stopCurrentTask() },
+                                onCancel = { viewModel.cancelCurrentTask() },
+                                onTogglePauseResume = { viewModel.togglePauseResume() },
+                                onTakeOver = { viewModel.handOverControlToUser() }
+                            )
+                        }
+                        ChatLiveExecutionBubble(
+                            statusText = state.statusNoticeAr.ifBlank {
+                                if (state.isPaused) "المهمة متوقفة مؤقتاً — بانتظارك"
+                                else AgentPromptRules.WAIT_THINKING_NOTICE_AR
+                            },
+                            isPaused = state.isPaused,
+                            canPauseOrTakeOver = canPauseOrTakeOver,
+                            actions = liveActions
                         )
                     }
                 }

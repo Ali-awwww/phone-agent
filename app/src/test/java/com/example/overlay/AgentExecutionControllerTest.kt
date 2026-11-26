@@ -1,6 +1,7 @@
 package com.example.overlay
 
 import com.example.policy.AgentPromptRules
+import com.example.ui.components.ChatLiveExecutionActions
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -51,6 +52,42 @@ class AgentExecutionControllerTest {
         }
 
         assertFalse(reachedAfterPause)
+    }
+
+    @Test
+    fun `in-bubble stop and cancel handlers terminate active execution immediately`() = runBlocking {
+        val controller = AgentExecutionController()
+        controller.setPaused(true)
+
+        val job1 = async {
+            controller.awaitIfPaused()
+        }
+        var stoppedCount = 0
+        var cancelledCount = 0
+        val actions = ChatLiveExecutionActions(
+            onStop = {
+                stoppedCount++
+                job1.cancel(CancellationException("stopped from chat bubble"))
+                controller.reset()
+            },
+            onCancel = {
+                cancelledCount++
+                controller.reset()
+            }
+        )
+
+        actions.onStop()
+        try {
+            job1.await()
+        } catch (_: CancellationException) {
+            // Expected cancellation on stop
+        }
+        assertEquals(1, stoppedCount)
+        assertFalse(controller.isPaused.value)
+
+        actions.onCancel()
+        assertEquals(1, cancelledCount)
+        assertFalse(controller.isPaused.value)
     }
 
     @Test

@@ -1,6 +1,11 @@
 package com.example.ui.components
 
 import android.graphics.drawable.Drawable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -9,38 +14,50 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Alarm
 import androidx.compose.material.icons.rounded.Apps
+import androidx.compose.material.icons.rounded.Cancel
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.PanTool
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.RadioButtonUnchecked
 import androidx.compose.material.icons.rounded.ScreenSearchDesktop
 import androidx.compose.material.icons.rounded.SmartToy
 import androidx.compose.material.icons.rounded.SportsEsports
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.StopCircle
 import androidx.compose.material.icons.rounded.TaskAlt
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -91,6 +108,276 @@ data class ChatTaskCardItem(
     val dueAtMillis: Long?,
     val isCompleted: Boolean
 )
+
+/**
+ * معالجات أزرار التحكم المدمجة داخل فقاعة التحضير/التنفيذ في المحادثة.
+ */
+data class ChatLiveExecutionActions(
+    val onStop: () -> Unit,
+    val onCancel: () -> Unit,
+    val onTogglePauseResume: () -> Unit = {},
+    val onTakeOver: () -> Unit = {}
+)
+
+/**
+ * فقاعة حالة التحضير والتنفيذ داخل تدفق المحادثة نفسه (بديل البطاقة الحمراء المنفصلة).
+ * تعرض مؤشر كتابة متحركاً أثناء التحضير/التنفيذ مع أزرار صغيرة مدمجة للإيقاف والإلغاء.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun ChatLiveExecutionBubble(
+    statusText: String,
+    isPaused: Boolean,
+    canPauseOrTakeOver: Boolean,
+    actions: ChatLiveExecutionActions,
+    modifier: Modifier = Modifier
+) {
+    val bubbleShape = RoundedCornerShape(
+        topStart = 4.dp,
+        topEnd = 18.dp,
+        bottomStart = 18.dp,
+        bottomEnd = 18.dp
+    )
+    val borderColor = if (isPaused) {
+        StatusPending.copy(alpha = 0.75f)
+    } else {
+        CyberElectricCyan.copy(alpha = 0.55f)
+    }
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+            .testTag("chat_live_execution_bubble"),
+        horizontalArrangement = Arrangement.End
+    ) {
+        Surface(
+            modifier = Modifier
+                .widthIn(max = 320.dp)
+                .clip(bubbleShape),
+            shape = bubbleShape,
+            color = CyberSurfaceNavy,
+            border = BorderStroke(1.dp, borderColor)
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.SmartToy,
+                            contentDescription = null,
+                            tint = if (isPaused) StatusPending else CyberElectricCyan,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "وكيل الهاتف",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isPaused) StatusPending else CyberElectricCyan
+                        )
+                    }
+
+                    if (isPaused) {
+                        Text(
+                            text = "متوقف مؤقتاً",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = StatusPending
+                        )
+                    } else {
+                        AnimatedTypingDots()
+                    }
+                }
+
+                Text(
+                    text = statusText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = CyberTextPrimary,
+                    softWrap = true
+                )
+
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    FilledTonalButton(
+                        onClick = actions.onStop,
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 1.dp, minHeight = 36.dp)
+                            .minimumInteractiveComponentSize()
+                            .testTag("stop_active_task_button"),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = CyberSurfaceElevated,
+                            contentColor = CyberSoftCyan
+                        ),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Stop,
+                            contentDescription = "إيقاف المهمة فوراً",
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = "إيقاف",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+
+                    if (canPauseOrTakeOver) {
+                        OutlinedButton(
+                            onClick = actions.onTogglePauseResume,
+                            modifier = Modifier
+                                .defaultMinSize(minWidth = 1.dp, minHeight = 36.dp)
+                                .minimumInteractiveComponentSize()
+                                .testTag("pause_resume_task_button"),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(
+                                1.dp,
+                                if (isPaused) StatusSuccess.copy(alpha = 0.7f) else CyberBorderGlow
+                            ),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isPaused) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
+                                contentDescription = if (isPaused) "استئناف" else "إيقاف مؤقت",
+                                tint = if (isPaused) StatusSuccess else CyberElectricCyan,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = if (isPaused) "استئناف" else "إيقاف مؤقت",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (isPaused) StatusSuccess else CyberElectricCyan,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = actions.onTakeOver,
+                            modifier = Modifier
+                                .defaultMinSize(minWidth = 1.dp, minHeight = 36.dp)
+                                .minimumInteractiveComponentSize()
+                                .testTag("user_takeover_button"),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, CyberElectricCyan.copy(alpha = 0.7f)),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.PanTool,
+                                contentDescription = "أكمل بنفسي",
+                                tint = CyberElectricCyan,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "أكمل بنفسي",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = CyberElectricCyan,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = actions.onCancel,
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 1.dp, minHeight = 36.dp)
+                            .minimumInteractiveComponentSize()
+                            .testTag("cancel_current_task_button"),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, StatusCancelled.copy(alpha = 0.65f)),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Cancel,
+                            contentDescription = "إلغاء المهمة الحالية",
+                            tint = StatusCancelled,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = "إلغاء المهمة",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = StatusCancelled,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AnimatedTypingDots() {
+    val transition = rememberInfiniteTransition(label = "agent_typing_dots")
+    val dot1 by transition.animateFloat(
+        initialValue = 0.25f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 520, delayMillis = 0),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "dot1"
+    )
+    val dot2 by transition.animateFloat(
+        initialValue = 0.25f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 520, delayMillis = 160),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "dot2"
+    )
+    val dot3 by transition.animateFloat(
+        initialValue = 0.25f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 520, delayMillis = 320),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "dot3"
+    )
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(
+            text = "جارٍ الكتابة",
+            style = MaterialTheme.typography.labelSmall,
+            color = CyberSoftCyan
+        )
+        listOf(dot1, dot2, dot3).forEach { alphaVal ->
+            Box(
+                modifier = Modifier
+                    .size(5.dp)
+                    .background(
+                        color = CyberElectricCyan.copy(alpha = alphaVal),
+                        shape = CircleShape
+                    )
+            )
+        }
+    }
+}
 
 /**
  * فقاعة محادثة بتصميم RTL:
