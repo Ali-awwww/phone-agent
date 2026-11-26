@@ -66,9 +66,12 @@ import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.permissions.AgentPermissionType
+import com.example.permissions.PermissionHelper
 import com.example.model.AppFolder
 import com.example.organizer.InstalledAppInfo
 import com.example.ui.components.CyberPanelCard
+import com.example.ui.components.MarkdownText
 import com.example.ui.components.PlayFeatureInfoDialog
 import com.example.ui.components.PlayWithAgentPromoCard
 import com.example.ui.theme.CyberBgDeep
@@ -76,14 +79,17 @@ import com.example.ui.theme.CyberBorderGlow
 import com.example.ui.theme.CyberElectricBlue
 import com.example.ui.theme.CyberElectricCyan
 import com.example.ui.theme.CyberOnCyan
+import com.example.ui.theme.CyberSoftCyan
 import com.example.ui.theme.CyberSurfaceElevated
 import com.example.ui.theme.CyberSurfaceNavy
 import com.example.ui.theme.CyberTextPrimary
 import com.example.ui.theme.CyberTextSecondary
+import com.example.ui.theme.StatusCancelled
 import com.example.ui.theme.StatusCyanInfoContainer
 import com.example.ui.theme.StatusPending
 import com.example.ui.theme.StatusPendingContainer
 import com.example.ui.viewmodel.AppsViewModel
+import com.example.ui.viewmodel.SummarizeBlockedReason
 
 @Composable
 fun AppsScreen(
@@ -323,7 +329,15 @@ fun AppsScreen(
                         AppItemCard(
                             app = app,
                             onOpen = { viewModel.openApp(context, app) },
-                            onTryAndSummarize = { viewModel.tryAndSummarizeApp(app) },
+                            onTryAndSummarize = {
+                                if (!PermissionHelper.isAccessibilityEnabled(context)) {
+                                    viewModel.setSummarizeBlockedReason(SummarizeBlockedReason.ACCESSIBILITY)
+                                } else if (!PermissionHelper.isOverlayPermissionGranted(context)) {
+                                    viewModel.setSummarizeBlockedReason(SummarizeBlockedReason.OVERLAY)
+                                } else {
+                                    viewModel.tryAndSummarizeApp(app)
+                                }
+                            },
                             onMoveClick = { moveDialogApp = app },
                             onToggleHide = { viewModel.toggleHideApp(app) }
                         )
@@ -372,25 +386,91 @@ fun AppsScreen(
         )
     }
 
+    state.summarizeBlockedReason?.let { blockedReason ->
+        val title = when (blockedReason) {
+            SummarizeBlockedReason.ACCESSIBILITY -> "إذن إمكانية الوصول مطلوب"
+            SummarizeBlockedReason.OVERLAY -> "إذن العرض فوق التطبيقات مطلوب"
+        }
+        val message = when (blockedReason) {
+            SummarizeBlockedReason.ACCESSIBILITY -> "فعّل إمكانية الوصول أولاً حتى يستطيع الوكيل قراءة شاشة التطبيق."
+            SummarizeBlockedReason.OVERLAY -> "اسمح بالعرض فوق التطبيقات الأخرى حتى تظهر أزرار التحكم العائمة (إيقاف/استئناف/أكمل بنفسي) فوق التطبيق."
+        }
+        val buttonText = when (blockedReason) {
+            SummarizeBlockedReason.ACCESSIBILITY -> "فتح إعدادات إمكانية الوصول"
+            SummarizeBlockedReason.OVERLAY -> "فتح إعدادات العرض فوق التطبيقات"
+        }
+        AlertDialog(
+            onDismissRequest = { viewModel.setSummarizeBlockedReason(null) },
+            containerColor = CyberSurfaceNavy,
+            shape = MaterialTheme.shapes.large,
+            title = { Text(title, color = CyberElectricCyan) },
+            text = { Text(message, color = CyberTextPrimary) },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.setSummarizeBlockedReason(null)
+                        val type = when (blockedReason) {
+                            SummarizeBlockedReason.ACCESSIBILITY -> AgentPermissionType.ACCESSIBILITY
+                            SummarizeBlockedReason.OVERLAY -> AgentPermissionType.OVERLAY
+                        }
+                        PermissionHelper.openPermissionSettings(context, type)
+                    },
+                    shape = MaterialTheme.shapes.small,
+                    colors = ButtonDefaults.buttonColors(containerColor = CyberElectricCyan, contentColor = CyberOnCyan)
+                ) {
+                    Text(buttonText, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.setSummarizeBlockedReason(null) }) {
+                    Text("إلغاء", color = CyberElectricCyan)
+                }
+            }
+        )
+    }
+
     if (state.summarizingAppName != null) {
         AlertDialog(
-            onDismissRequest = {},
+            onDismissRequest = { viewModel.cancelSummarizing() },
             containerColor = CyberSurfaceNavy,
             shape = MaterialTheme.shapes.large,
             title = { Text("جاري استكشاف وتلخيص «${state.summarizingAppName}»", color = CyberElectricCyan) },
             text = {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    CircularProgressIndicator(color = CyberElectricCyan)
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        CircularProgressIndicator(color = CyberElectricCyan)
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                text = state.summarizingStep ?: "يفتح الوكيل التطبيق ويقرأ شاشته عبر Gemini لتلخيص محتواه بأمان...",
+                                color = CyberTextPrimary,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "الزمن المنقضي: ${state.summarizingElapsedSeconds} ثانية",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = CyberTextSecondary
+                            )
+                        }
+                    }
                     Text(
-                        "يفتح الوكيل التطبيق ويقرأ شاشته عبر Gemini لتلخيص محتواه بأمان...",
-                        color = CyberTextPrimary
+                        text = "قد يستغرق التشغيل الكامل نحو دقيقتين، يمكنك الإلغاء في أي وقت.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = CyberSoftCyan
                     )
                 }
             },
-            confirmButton = {}
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.cancelSummarizing() },
+                    shape = MaterialTheme.shapes.small,
+                    colors = ButtonDefaults.buttonColors(containerColor = StatusCancelled, contentColor = Color.White)
+                ) {
+                    Text("إلغاء", fontWeight = FontWeight.Bold)
+                }
+            }
         )
     }
 
@@ -403,7 +483,7 @@ fun AppsScreen(
             title = { Text("ملخص تطبيق «$appName»", color = CyberElectricCyan) },
             text = {
                 Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                    Text(summary, style = MaterialTheme.typography.bodyLarge, color = CyberTextPrimary)
+                    MarkdownText(text = summary, color = CyberTextPrimary)
                 }
             },
             confirmButton = {

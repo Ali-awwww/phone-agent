@@ -54,6 +54,8 @@ import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import com.example.chat.ChatTurn
+import com.example.chat.ConversationMemory
 import com.example.BuildConfig
 import com.example.security.DisconnectionCategory
 import com.example.security.classifyModelError
@@ -112,6 +114,7 @@ data class CommandsScreenState(
     val isPaused: Boolean = false,
     val statusNoticeAr: String = "",
     val showPlayFeatureDialog: Boolean = false,
+    val showAppPickerForGameplay: Boolean = false,
     val executionTruthReportAr: String? = null,
     val modelConnectionStatus: ModelConnectionStatus = ModelConnectionStatus.NotChecked,
     val appCheckDebugToken: String = "",
@@ -1036,7 +1039,36 @@ class CommandsViewModel(
         speakIfEnabled(reply)
     }
 
+    private val conversationTurns = mutableListOf<ChatTurn>()
+
     private suspend fun handleConversationalChat(userMessage: String, retryCommand: String = userMessage) {
+        val installed = ensureInstalledAppsLoaded()
+        val appLabels = installed.map { it.label }
+
+        if (ConversationMemory.isInstalledAppQuestion(userMessage)) {
+            val historyText = ConversationMemory.formatHistory(conversationTurns)
+            val foundApp = ConversationMemory.findAppInHistory(historyText, appLabels)
+            if (foundApp != null) {
+                val isInstalled = installed.any { it.label.equals(foundApp, ignoreCase = true) }
+                val reply = if (isInstalled) {
+                    "نعم، «$foundApp» مثبّتة لديك."
+                } else {
+                    "لا، «$foundApp» غير مثبّتة على هاتفك."
+                }
+                conversationTurns.add(ChatTurn("user", userMessage))
+                conversationTurns.add(ChatTurn("model", reply))
+                if (conversationTurns.size > 30) {
+                    val dropCount = conversationTurns.size - 30
+                    repeat(dropCount) { conversationTurns.removeAt(0) }
+                }
+                chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
+                _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
+                speakIfEnabled(reply)
+                return
+            }
+        }
+
+        val historyText = ConversationMemory.formatHistory(conversationTurns)
         val baseContext = buildString {
             append("تطبيقات محملة: ${cachedInstalledApps.size}. ")
             append(
@@ -1045,17 +1077,25 @@ class CommandsViewModel(
             )
         }
         try {
-            val appLabels = cachedInstalledApps.map { it.label }
             val modelTier = ChatIntentRouter.classifyModelTier(userMessage, appLabels)
             val meta = geminiRepository.conversationalReplyWithMeta(
                 userMessage = userMessage,
                 contextSummary = AgentPromptRules.enrichChatContextSummary(baseContext),
+                history = historyText,
                 onStatusUpdate = { statusMsg ->
                     _state.update { it.copy(statusNoticeAr = statusMsg) }
                 },
                 modelTier = modelTier
             )
             recordModelRouteUsage(meta, userMessage)
+
+            conversationTurns.add(ChatTurn("user", userMessage))
+            conversationTurns.add(ChatTurn("model", meta.value))
+            if (conversationTurns.size > 30) {
+                val dropCount = conversationTurns.size - 30
+                repeat(dropCount) { conversationTurns.removeAt(0) }
+            }
+
             chatHistoryRepository.addAgentMessage(meta.value, ChatMessageType.TEXT)
             _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = meta.value) }
             speakIfEnabled(meta.value)
@@ -1100,8 +1140,20 @@ class CommandsViewModel(
 
     fun startGameplayGoal(goal: String = "العب اللعبة أو التطبيق الظاهر على الشاشة كالإنسان خطوة بخطوة") {
         lastGameplayGoal = goal
-        _state.update { it.copy(showPlayFeatureDialog = false, activeError = null) }
-        startGameplayLoop(goal)
+        _state.update { it.copy(showPlayFeatureDialog = false, activeError = null, showAppPickerForGameplay = true) }
+    }
+
+    fun dismissAppPickerForGameplay() {
+        _state.update { it.copy(showAppPickerForGameplay = false) }
+    }
+
+    fun selectAppForGameplay(app: InstalledAppInfo) {
+        _state.update { it.copy(showAppPickerForGameplay = false) }
+        launchAppFromChat(app.packageName, app.label)
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(1200L)
+            startGameplayLoop("العب في تطبيق ${app.label}")
+        }
     }
 
     private fun startGameplayLoop(goalText: String) {
@@ -1233,11 +1285,7 @@ class CommandsViewModel(
             val succeededList = mutableListOf<String>()
             val failedList = mutableListOf<String>()
 
-            floatingControlManager.show(
-                initialStatusAr = "ينفّذ الوكيل الخطة (ثوانٍ للتحقق في كل خطوة)",
-                isPaused = false,
-                callbacks = buildFloatingControlCallbacks()
-            )
+
 
             try {
                 var plan = currentState.plan

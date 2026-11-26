@@ -10,6 +10,9 @@ import com.example.model.AppFolder
 import com.example.organizer.AppOrganizer
 import com.example.organizer.InstalledAppInfo
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,6 +22,13 @@ import kotlinx.coroutines.launch
 
 private const val TAG = "AppsViewModel"
 
+const val TRY_SUMMARIZE_TIMEOUT_MS = 180_000L
+
+enum class SummarizeBlockedReason {
+    ACCESSIBILITY,
+    OVERLAY
+}
+
 data class AppsUiState(
     val allApps: List<InstalledAppInfo> = emptyList(),
     val selectedFolder: AppFolder? = null,
@@ -27,6 +37,9 @@ data class AppsUiState(
     val isLoading: Boolean = true,
     val isAutoCategorizing: Boolean = false,
     val summarizingAppName: String? = null,
+    val summarizingStep: String? = null,
+    val summarizingElapsedSeconds: Int = 0,
+    val summarizeBlockedReason: SummarizeBlockedReason? = null,
     val appSummaryResult: Pair<String, String>? = null,
     val statusMessage: String? = null
 ) {
@@ -148,29 +161,87 @@ class AppsViewModel(
         }
     }
 
+    private var summarizeJob: Job? = null
+    private var summaryTimerJob: Job? = null
+
     fun tryAndSummarizeApp(app: InstalledAppInfo) {
-        viewModelScope.launch {
-            _state.update { it.copy(summarizingAppName = app.label, statusMessage = null) }
+        summarizeJob?.cancel()
+        summaryTimerJob?.cancel()
+        _state.update {
+            it.copy(
+                summarizingAppName = app.label,
+                summarizingStep = "جارٍ فتح التطبيق…",
+                summarizingElapsedSeconds = 0,
+                statusMessage = null
+            )
+        }
+        summaryTimerJob = viewModelScope.launch {
+            while (true) {
+                delay(1000L)
+                _state.update { it.copy(summarizingElapsedSeconds = it.summarizingElapsedSeconds + 1) }
+            }
+        }
+        summarizeJob = viewModelScope.launch {
             try {
-                val summary = appOrganizer.tryAndSummarizeApp(app)
+                val summary = kotlinx.coroutines.withTimeout(TRY_SUMMARIZE_TIMEOUT_MS) {
+                    appOrganizer.tryAndSummarizeApp(app) { step ->
+                        _state.update { it.copy(summarizingStep = step) }
+                    }
+                }
+                summaryTimerJob?.cancel()
                 _state.update {
                     it.copy(
                         summarizingAppName = null,
+                        summarizingStep = null,
+                        summarizingElapsedSeconds = 0,
                         appSummaryResult = app.label to summary
                     )
                 }
+            } catch (e: TimeoutCancellationException) {
+                summaryTimerJob?.cancel()
+                _state.update {
+                    it.copy(
+                        summarizingAppName = null,
+                        summarizingStep = null,
+                        summarizingElapsedSeconds = 0,
+                        statusMessage = "انتهت مهلة التلخيص (3 دقائق). تحقق من الاتصال وإمكانية الوصول ثم أعد المحاولة."
+                    )
+                }
             } catch (e: CancellationException) {
+                summaryTimerJob?.cancel()
                 throw e
             } catch (e: Exception) {
+                summaryTimerJob?.cancel()
                 Log.e(TAG, "Try and summarize failed", e)
                 _state.update {
                     it.copy(
                         summarizingAppName = null,
+                        summarizingStep = null,
+                        summarizingElapsedSeconds = 0,
                         statusMessage = "تعذر تلخيص التطبيق: ${e.localizedMessage}"
                     )
                 }
             }
         }
+    }
+
+    fun cancelSummarizing() {
+        summarizeJob?.cancel()
+        summaryTimerJob?.cancel()
+        summarizeJob = null
+        summaryTimerJob = null
+        _state.update {
+            it.copy(
+                summarizingAppName = null,
+                summarizingStep = null,
+                summarizingElapsedSeconds = 0,
+                statusMessage = "تم إلغاء عملية التلخيص."
+            )
+        }
+    }
+
+    fun setSummarizeBlockedReason(reason: SummarizeBlockedReason?) {
+        _state.update { it.copy(summarizeBlockedReason = reason) }
     }
 
     fun dismissSummaryDialog() {

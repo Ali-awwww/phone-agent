@@ -87,6 +87,7 @@ import com.example.BuildConfig
 import com.example.data.local.ChatMessageEntity
 import com.example.data.local.ChatMessageType
 import com.example.policy.AgentPromptRules
+import com.example.ui.components.AppPickerForGameplayDialog
 import com.example.ui.components.ChatLiveExecutionActions
 import com.example.ui.components.ChatLiveExecutionBubble
 import com.example.ui.components.ChatMessageBubble
@@ -95,6 +96,7 @@ import com.example.ui.components.CyberPlanCard
 import com.example.ui.components.PlayFeatureInfoDialog
 import com.example.ui.components.PlayWithAgentPromoCard
 import com.example.ui.components.SensitiveStepApprovalDialog
+import com.example.organizer.InstalledAppInfo
 import com.example.ui.theme.CyberBgDeep
 import com.example.ui.theme.CyberBorderGlow
 import com.example.ui.theme.CyberElectricBlue
@@ -627,6 +629,19 @@ fun CommandsScreen(
             onOpenPermissions = {
                 viewModel.dismissPlayFeatureDialog()
                 onOpenPermissionsTab()
+            }
+        )
+    }
+
+    if (state.showAppPickerForGameplay) {
+        val installedAppsList = remember(installedAppsByPackage) {
+            installedAppsByPackage.values.toList().sortedBy { it.label }
+        }
+        AppPickerForGameplayDialog(
+            installedApps = installedAppsList,
+            onDismiss = { viewModel.dismissAppPickerForGameplay() },
+            onAppSelected = { app ->
+                viewModel.selectAppForGameplay(app)
             }
         )
     }

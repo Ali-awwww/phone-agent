@@ -2,6 +2,7 @@ package com.example.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,9 +14,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.clip
+import com.example.organizer.InstalledAppInfo
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Cancel
@@ -29,6 +34,7 @@ import androidx.compose.material.icons.outlined.Autorenew
 import androidx.compose.material.icons.outlined.PendingActions
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -36,9 +42,14 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -454,3 +465,85 @@ fun SensitiveStepApprovalDialog(
         }
     )
 }
+
+@Composable
+fun AppPickerForGameplayDialog(
+    installedApps: List<InstalledAppInfo>,
+    onDismiss: () -> Unit,
+    onAppSelected: (InstalledAppInfo) -> Unit
+) {
+    var searchQuery by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+    val filtered = androidx.compose.runtime.remember(installedApps, searchQuery) {
+        if (searchQuery.isBlank()) installedApps
+        else installedApps.filter { it.label.contains(searchQuery, ignoreCase = true) || it.packageName.contains(searchQuery, ignoreCase = true) }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = CyberSurfaceNavy,
+        shape = MaterialTheme.shapes.large,
+        title = {
+            Text("اختر التطبيق أو اللعبة ليبدأ الوكيل اللعب والتفاعل", color = CyberElectricCyan, fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 400.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("بحث عن تطبيق...", color = CyberTextSecondary) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = MaterialTheme.shapes.small
+                )
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(filtered, key = { it.packageName }) { app ->
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(MaterialTheme.shapes.small)
+                                .clickable { onAppSelected(app) },
+                            color = CyberSurfaceElevated,
+                            shape = MaterialTheme.shapes.small,
+                            border = BorderStroke(1.dp, CyberBorderGlow)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(text = app.label, fontWeight = FontWeight.Bold, color = CyberTextPrimary)
+                                    Text(text = app.folder.titleAr, style = MaterialTheme.typography.labelSmall, color = CyberSoftCyan)
+                                }
+                                Button(
+                                    onClick = { onAppSelected(app) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = CyberElectricCyan, contentColor = CyberOnCyan),
+                                    shape = MaterialTheme.shapes.small
+                                ) {
+                                    Text("ابدأ اللعب")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("إلغاء", color = CyberElectricCyan)
+            }
+        }
+    )
+}
+

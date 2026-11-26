@@ -877,12 +877,14 @@ class GeminiRepository internal constructor(
     suspend fun conversationalReply(
         userMessage: String,
         contextSummary: String,
+        history: String = "",
         onStatusUpdate: (suspend (String) -> Unit)? = null,
         modelTier: ModelRouteTier = ModelRouteTier.LITE
     ): String {
         return conversationalReplyWithMeta(
             userMessage = userMessage,
             contextSummary = contextSummary,
+            history = history,
             onStatusUpdate = onStatusUpdate,
             modelTier = modelTier
         ).value
@@ -891,15 +893,22 @@ class GeminiRepository internal constructor(
     suspend fun conversationalReplyWithMeta(
         userMessage: String,
         contextSummary: String,
+        history: String = "",
         onStatusUpdate: (suspend (String) -> Unit)? = null,
         modelTier: ModelRouteTier = ModelRouteTier.LITE
     ): ModelResponseMetadata<String> {
         return try {
-            val prompt = """
-                رسالة المستخدم: $userMessage
-                سياق الحالة الحالية: $contextSummary
-                أجب برد عربي طبيعي وواضح ومفيد كمساعد ذكي متكامل.
-            """.trimIndent()
+            val prompt = buildString {
+                if (history.isNotBlank()) {
+                    appendLine("سجل المحادثة السابق:")
+                    appendLine(history)
+                    appendLine("تعليمات هامة: استخدم سجل المحادثة لحل الضمائر (هو/هي/هذه/ذلك) ولا تبدأ بتحية جديدة إذا كان هناك سجل؛ أجب عن السؤال مباشرة بالرجوع إلى ما سبق.")
+                    appendLine()
+                }
+                appendLine("رسالة المستخدم الحالية: $userMessage")
+                appendLine("سياق الحالة الحالية: $contextSummary")
+                append("أجب برد عربي طبيعي وواضح ومفيد كمساعد ذكي متكامل.")
+            }
             val chain = getModelChainForTier(modelTier)
             val candidates = if (modelTier == ModelRouteTier.LITE) {
                 listOf(

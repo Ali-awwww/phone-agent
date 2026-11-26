@@ -220,49 +220,61 @@ class AppOrganizer(
         appOrganizationDao.updateHidden(packageName, isHidden)
     }
 
-    suspend fun tryAndSummarizeApp(app: InstalledAppInfo): String {
+    suspend fun tryAndSummarizeApp(
+        app: InstalledAppInfo,
+        onProgress: ((String) -> Unit)? = null
+    ): String {
+        val service = ScreenStateBridge.getService()
+        if (service == null) {
+            val notice = "خدمة إمكانية الوصول غير مفعلة. لا يمكن قراءة شاشة التطبيق دون تفعيلها."
+            actionLogRepository.logAction(
+                title = "تعذر تلخيص «${app.label}»",
+                details = notice,
+                status = ActionStatus.PENDING_APPROVAL,
+                actionType = "SUMMARIZE_BLOCKED_ACCESSIBILITY"
+            )
+            return notice
+        }
+
+        onProgress?.invoke("جارٍ فتح التطبيق…")
         val launchIntent = createLaunchIntent(context, app.packageName)
             ?: throw IllegalStateException("لا يمكن فتح التطبيق «${app.label}».")
 
         context.startActivity(launchIntent)
-        val capturedScreens = mutableListOf<String>()
-        val service = ScreenStateBridge.getService()
+        delay(1500L)
 
-        if (service != null) {
-            delay(1800L)
+        onProgress?.invoke("جارٍ قراءة الشاشة…")
+        val capturedScreens = mutableListOf<String>()
+        service.captureCurrentScreen()?.let { snap ->
+            if (!snap.hasSensitiveSecurityField) {
+                capturedScreens.add(snap.toCompactPromptText())
+            }
+        }
+        if (service.scrollForward()) {
+            delay(1000L)
             service.captureCurrentScreen()?.let { snap ->
                 if (!snap.hasSensitiveSecurityField) {
                     capturedScreens.add(snap.toCompactPromptText())
                 }
             }
-            // التمرير بأمان لقراءة الشاشة الثانية إن أمكن
-            if (service.scrollForward()) {
-                delay(1200L)
-                service.captureCurrentScreen()?.let { snap ->
-                    if (!snap.hasSensitiveSecurityField) {
-                        capturedScreens.add(snap.toCompactPromptText())
-                    }
-                }
-            }
         }
 
         if (capturedScreens.isEmpty()) {
-            val truthfulNotice = "تم فتح تطبيق «${app.label}» بنجاح، لكن خدمة إمكانية الوصول غير مفعلة حالياً لقراءة عناصر شاشته الفعلية.\n\nلتجربة التطبيق وتلخيص محتواه بدقة دون تخمين، فعّل «خدمة إمكانية الوصول» من تبويب الأذونات ثم أعد المحاولة."
-            actionLogRepository.logAction(
-                title = "فتح «${app.label}» (تعذر التلخيص لعدم تفعيل الوصول)",
-                details = truthfulNotice,
-                status = ActionStatus.PENDING_APPROVAL,
-                actionType = "SUMMARIZE_APP"
-            )
+            val truthfulNotice = "تم فتح تطبيق «${app.label}» بنجاح، لكن خدمة إمكانية الوصول لم تلتقط نصوصاً على شاشته."
             return truthfulNotice
         }
 
+        onProgress?.invoke("جارٍ سؤال النموذج…")
         val summary = geminiRepository.summarizeAppScreens(
             appName = app.label,
             packageName = app.packageName,
-            capturedScreenTexts = capturedScreens
+            capturedScreenTexts = capturedScreens,
+            onStatusUpdate = { status ->
+                onProgress?.invoke("جارٍ كتابة الملخص… ($status)")
+            }
         )
 
+        onProgress?.invoke("جارٍ كتابة الملخص…")
         val existing = appOrganizationDao.getOrganization(app.packageName)
         appOrganizationDao.upsertOrganization(
             AppOrganizationEntity(

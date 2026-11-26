@@ -100,17 +100,20 @@ class AgentFloatingControlManager(private val context: Context) {
         initialStatusAr: String,
         isPaused: Boolean,
         callbacks: FloatingControlCallbacks
-    ) {
-        if (!Settings.canDrawOverlays(context)) return
-        withContext(Dispatchers.Main) {
+    ): Boolean {
+        if (!Settings.canDrawOverlays(context)) {
+            Log.w(TAG, "Cannot show floating controls: SYSTEM_ALERT_WINDOW permission not granted.")
+            return false
+        }
+        return withContext(Dispatchers.Main) {
             try {
                 if (rootView != null) {
                     updateStatusInternal(initialStatusAr, isPaused)
-                    return@withContext
+                    return@withContext true
                 }
 
                 val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
-                    ?: return@withContext
+                    ?: return@withContext false
                 windowManager = wm
                 isMinimized = false
 
@@ -120,30 +123,25 @@ class AgentFloatingControlManager(private val context: Context) {
 
                 val expanded = LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL
-                    setPadding(24, 18, 24, 18)
+                    setPadding(20, 14, 20, 14)
                     background = GradientDrawable().apply {
                         setColor(Color.parseColor("#F00A1930"))
-                        cornerRadius = 36f
-                        setStroke(3, Color.parseColor("#00D4FF"))
+                        cornerRadius = 28f
+                        setStroke(2, Color.parseColor("#00D4FF"))
                     }
                 }
 
                 val statusTv = TextView(context).apply {
                     text = initialStatusAr
                     setTextColor(Color.parseColor("#EAF4FF"))
-                    textSize = 13f
-                    setPadding(0, 0, 0, 12)
+                    textSize = 12f
+                    setPadding(0, 0, 0, 8)
                 }
                 statusView = statusTv
 
                 val row1 = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                }
-                val row2 = LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, 10, 0, 0)
                 }
 
                 val stopBtn = createStyledButton(
@@ -171,33 +169,23 @@ class AgentFloatingControlManager(private val context: Context) {
                     callbacks.onTakeOverByUser()
                 }
 
-                val minimizeBtn = createStyledButton(
-                    label = "تصغير",
-                    bgHex = "#1E3A5F",
-                    textColor = Color.parseColor("#EAF4FF")
-                ) {
-                    setMinimizedInternal(true)
-                }
-
-                row1.addView(stopBtn, createRowButtonParams(marginEnd = 10))
-                row1.addView(pauseBtn, createRowButtonParams(marginEnd = 0))
-                row2.addView(takeOverBtn, createRowButtonParams(marginEnd = 10))
-                row2.addView(minimizeBtn, createRowButtonParams(marginEnd = 0))
+                row1.addView(stopBtn, createRowButtonParams(marginEnd = 6))
+                row1.addView(pauseBtn, createRowButtonParams(marginEnd = 6))
+                row1.addView(takeOverBtn, createRowButtonParams(marginEnd = 0))
 
                 expanded.addView(statusTv)
                 expanded.addView(row1)
-                expanded.addView(row2)
                 expandedPanel = expanded
 
                 val pill = TextView(context).apply {
-                    text = "● الوكيل (إظهار التحكم)"
+                    text = "● الوكيل (إظهار)"
                     setTextColor(Color.parseColor("#031226"))
-                    textSize = 12f
-                    setPadding(24, 14, 24, 14)
+                    textSize = 11f
+                    setPadding(18, 10, 18, 10)
                     background = GradientDrawable().apply {
                         setColor(Color.parseColor("#00D4FF"))
-                        cornerRadius = 48f
-                        setStroke(3, Color.parseColor("#EAF4FF"))
+                        cornerRadius = 36f
+                        setStroke(2, Color.parseColor("#EAF4FF"))
                     }
                     visibility = View.GONE
                 }
@@ -217,26 +205,27 @@ class AgentFloatingControlManager(private val context: Context) {
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                     PixelFormat.TRANSLUCENT
                 ).apply {
-                    gravity = Gravity.TOP or Gravity.START
-                    x = 24
-                    y = 140
+                    gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                    x = 0
+                    y = 120
                 }
                 layoutParams = params
 
                 attachDragAndClickListener(pill, params, wm) {
                     setMinimizedInternal(false)
                 }
-                attachDragListener(expanded, params, wm)
 
                 root.addView(expanded)
                 root.addView(pill)
 
                 wm.addView(root, params)
                 rootView = root
+                true
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.w(TAG, "Unable to attach floating control panel", e)
+                false
             }
         }
     }
