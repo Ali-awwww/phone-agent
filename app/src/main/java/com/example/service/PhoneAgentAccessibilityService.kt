@@ -1,10 +1,42 @@
 package com.example.service
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
+import android.graphics.Rect
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.model.ScreenSnapshot
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+
+data class GameElementBound(
+    val label: String,
+    val centerXRatio: Float,
+    val centerYRatio: Float,
+    val isClickable: Boolean
+)
+
+data class GameScreenObservation(
+    val snapshot: ScreenSnapshot,
+    val elements: List<GameElementBound>
+) {
+    fun toPromptSummary(): String {
+        return buildString {
+            append(snapshot.toCompactPromptText())
+            if (elements.isNotEmpty()) {
+                appendLine("مواقع العناصر المرصودة (نسبية 0.0 إلى 1.0):")
+                elements.take(25).forEach { el ->
+                    val kind = if (el.isClickable) "زر" else "عنصر"
+                    val x = String.format(java.util.Locale.US, "%.2f", el.centerXRatio)
+                    val y = String.format(java.util.Locale.US, "%.2f", el.centerYRatio)
+                    appendLine("- $kind «${el.label}» عند (x=$x, y=$y)")
+                }
+            }
+        }.trim()
+    }
+}
 
 class PhoneAgentAccessibilityService : AccessibilityService() {
 
@@ -35,12 +67,22 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
     }
 
     fun captureCurrentScreen(): ScreenSnapshot? {
+        return captureDetailedScreenForGame()?.snapshot
+    }
+
+    fun captureDetailedScreenForGame(): GameScreenObservation? {
         val root = rootInActiveWindow ?: return null
         val packageName = root.packageName?.toString().orEmpty()
         val visibleTexts = linkedSetOf<String>()
         val clickableLabels = linkedSetOf<String>()
         val editableHints = linkedSetOf<String>()
+        val elementBounds = mutableListOf<GameElementBound>()
         var hasSensitiveField = false
+
+        val dm = resources.displayMetrics
+        val screenW = dm.widthPixels.coerceAtLeast(1).toFloat()
+        val screenH = dm.heightPixels.coerceAtLeast(1).toFloat()
+        val rect = Rect()
 
         fun traverse(node: AccessibilityNodeInfo?, depth: Int) {
             if (node == null || depth > 25) return
@@ -74,6 +116,24 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
                 editableHints.add(label)
             }
 
+            val labelForBound = text.ifEmpty { desc }
+            if (!node.isPassword && (labelForBound.isNotEmpty() || node.isClickable) && elementBounds.size < 40) {
+                node.getBoundsInScreen(rect)
+                if (rect.width() > 0 && rect.height() > 0) {
+                    val cx = (rect.exactCenterX() / screenW).coerceIn(0.02f, 0.98f)
+                    val cy = (rect.exactCenterY() / screenH).coerceIn(0.02f, 0.98f)
+                    val displayLabel = labelForBound.ifEmpty { "عنصر تفاعلي" }
+                    elementBounds.add(
+                        GameElementBound(
+                            label = displayLabel,
+                            centerXRatio = cx,
+                            centerYRatio = cy,
+                            isClickable = node.isClickable
+                        )
+                    )
+                }
+            }
+
             for (i in 0 until node.childCount) {
                 traverse(node.getChild(i), depth + 1)
             }
@@ -81,12 +141,16 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
 
         traverse(root, 0)
 
-        return ScreenSnapshot(
+        val snapshot = ScreenSnapshot(
             packageName = packageName,
             visibleTexts = visibleTexts.toList(),
             clickableLabels = clickableLabels.toList(),
             editableHints = editableHints.toList(),
             hasSensitiveSecurityField = hasSensitiveField
+        )
+        return GameScreenObservation(
+            snapshot = snapshot,
+            elements = elementBounds
         )
     }
 
@@ -153,6 +217,83 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
             }
         }
         return false
+    }
+
+    suspend fun performTapAt(xRatio: Float, yRatio: Float): Boolean {
+        val snapshot = captureCurrentScreen()
+        if (snapshot?.hasSensitiveSecurityField == true) {
+            return false
+        }
+        val dm = resources.displayMetrics
+        val x = (dm.widthPixels * xRatio.coerceIn(0.02f, 0.98f))
+        val y = (dm.heightPixels * yRatio.coerceIn(0.02f, 0.98f))
+        val path = Path().apply {
+            moveTo(x, y)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0L, 65L)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        return dispatchGestureSuspend(gesture)
+    }
+
+    suspend fun performSwipe(
+        startXRatio: Float,
+        startYRatio: Float,
+        endXRatio: Float,
+        endYRatio: Float,
+        durationMs: Long = 360L
+    ): Boolean {
+        val snapshot = captureCurrentScreen()
+        if (snapshot?.hasSensitiveSecurityField == true) {
+            return false
+        }
+        val dm = resources.displayMetrics
+        val startX = dm.widthPixels * startXRatio.coerceIn(0.02f, 0.98f)
+        val startY = dm.heightPixels * startYRatio.coerceIn(0.02f, 0.98f)
+        val endX = dm.widthPixels * endXRatio.coerceIn(0.02f, 0.98f)
+        val endY = dm.heightPixels * endYRatio.coerceIn(0.02f, 0.98f)
+
+        val path = Path().apply {
+            moveTo(startX, startY)
+            lineTo(endX, endY)
+        }
+        val stroke = GestureDescription.StrokeDescription(
+            path,
+            0L,
+            durationMs.coerceIn(80L, 2000L)
+        )
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        return dispatchGestureSuspend(gesture)
+    }
+
+    suspend fun performDrag(
+        startXRatio: Float,
+        startYRatio: Float,
+        endXRatio: Float,
+        endYRatio: Float,
+        durationMs: Long = 650L
+    ): Boolean {
+        return performSwipe(startXRatio, startYRatio, endXRatio, endYRatio, durationMs)
+    }
+
+    private suspend fun dispatchGestureSuspend(gesture: GestureDescription): Boolean {
+        return suspendCancellableCoroutine { cont ->
+            val dispatched = dispatchGesture(
+                gesture,
+                object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        if (cont.isActive) cont.resume(true)
+                    }
+
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        if (cont.isActive) cont.resume(false)
+                    }
+                },
+                null
+            )
+            if (!dispatched && cont.isActive) {
+                cont.resume(false)
+            }
+        }
     }
 
     fun navigateBack(): Boolean {

@@ -4,19 +4,61 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [ActionLogEntity::class, AppOrganizationEntity::class],
-    version = 1,
+    entities = [
+        ActionLogEntity::class,
+        AppOrganizationEntity::class,
+        ChatMessageEntity::class,
+        AgentTaskEntity::class
+    ],
+    version = 2,
     exportSchema = false
 )
 abstract class PhoneAgentDatabase : RoomDatabase() {
     abstract fun actionLogDao(): ActionLogDao
     abstract fun appOrganizationDao(): AppOrganizationDao
+    abstract fun chatMessageDao(): ChatMessageDao
+    abstract fun agentTaskDao(): AgentTaskDao
 
     companion object {
         @Volatile
         private var INSTANCE: PhoneAgentDatabase? = null
+
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `chat_messages` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `sender` TEXT NOT NULL,
+                        `text` TEXT NOT NULL,
+                        `messageType` TEXT NOT NULL,
+                        `payloadJson` TEXT,
+                        `createdAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `agent_tasks` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `taskType` TEXT NOT NULL,
+                        `dueAtMillis` INTEGER,
+                        `hour` INTEGER,
+                        `minute` INTEGER,
+                        `alarmRequestCode` INTEGER,
+                        `isCompleted` INTEGER NOT NULL,
+                        `isCancelled` INTEGER NOT NULL,
+                        `createdAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
 
         fun getInstance(context: Context): PhoneAgentDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -24,7 +66,10 @@ abstract class PhoneAgentDatabase : RoomDatabase() {
                     context.applicationContext,
                     PhoneAgentDatabase::class.java,
                     "phone_agent.db"
-                ).build().also { INSTANCE = it }
+                )
+                    .addMigrations(MIGRATION_1_2)
+                    .build()
+                    .also { INSTANCE = it }
             }
         }
     }

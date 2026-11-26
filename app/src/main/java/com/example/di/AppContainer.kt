@@ -7,6 +7,7 @@ import com.example.data.local.PhoneAgentDatabase
 import com.example.executor.CommandExecutor
 import com.example.organizer.AppOrganizer
 import com.example.policy.AgentPolicy
+import com.example.security.FirebaseAppCheckClient
 import com.example.verifier.ScreenVerifier
 import com.example.voice.VoiceAssistantManager
 
@@ -23,7 +24,9 @@ class AppContainer(context: Context) {
     }
 
     val geminiRepository by lazy {
-        GeminiRepository()
+        GeminiRepository(
+            appCheckClient = FirebaseAppCheckClient(appContext)
+        )
     }
 
     val screenVerifier by lazy {

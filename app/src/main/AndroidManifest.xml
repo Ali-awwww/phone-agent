@@ -27,6 +27,9 @@
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
 
+    <!-- نافذة عائمة لعرض زر إيقاف فوري فوق الألعاب والتطبيقات أثناء وضع اللعب -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -68,6 +71,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <intent-filter>
+                    <action android:name="android.intent.action.VIEW" />
+                    <category android:name="android.intent.category.DEFAULT" />
+                    <category android:name="android.intent.category.BROWSABLE" />
+                    <data android:scheme="phoneagent" />
+                    </intent-filter>
         </activity>
 
         <!-- خدمة إمكانية الوصول لوكيل الهاتف -->

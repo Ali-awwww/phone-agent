@@ -69,6 +69,8 @@ import com.example.R
 import com.example.model.AppFolder
 import com.example.organizer.InstalledAppInfo
 import com.example.ui.components.CyberPanelCard
+import com.example.ui.components.PlayFeatureInfoDialog
+import com.example.ui.components.PlayWithAgentPromoCard
 import com.example.ui.theme.CyberBgDeep
 import com.example.ui.theme.CyberBorderGlow
 import com.example.ui.theme.CyberElectricBlue
@@ -86,11 +88,14 @@ import com.example.ui.viewmodel.AppsViewModel
 @Composable
 fun AppsScreen(
     viewModel: AppsViewModel,
+    onStartGameplayFromApps: () -> Unit = {},
+    onOpenPermissionsTab: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var moveDialogApp by remember { mutableStateOf<InstalledAppInfo?>(null) }
+    var showPlayFeatureDialog by remember { mutableStateOf(false) }
 
     Box(
         modifier = modifier.fillMaxSize(),
@@ -279,17 +284,28 @@ fun AppsScreen(
                     CircularProgressIndicator(color = CyberElectricCyan)
                 }
             } else if (state.filteredApps.isEmpty()) {
-                Box(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
-                    contentAlignment = Alignment.Center
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text(
-                        text = "لا توجد تطبيقات مطابقة لبحثك في هذا المجلد.",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = CyberTextSecondary
+                    PlayWithAgentPromoCard(
+                        onTakeOverPlayClick = onStartGameplayFromApps,
+                        onExplainFeatureClick = { showPlayFeatureDialog = true }
                     )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "لا توجد تطبيقات مطابقة لبحثك في هذا المجلد.",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = CyberTextSecondary
+                        )
+                    }
                 }
             } else {
                 LazyColumn(
@@ -297,6 +313,12 @@ fun AppsScreen(
                     contentPadding = PaddingValues(bottom = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    item(key = "apps_play_feature_spotlight") {
+                        PlayWithAgentPromoCard(
+                            onTakeOverPlayClick = onStartGameplayFromApps,
+                            onExplainFeatureClick = { showPlayFeatureDialog = true }
+                        )
+                    }
                     items(state.filteredApps, key = { it.packageName }) { app ->
                         AppItemCard(
                             app = app,
@@ -395,6 +417,20 @@ fun AppsScreen(
                 ) {
                     Text("تم", fontWeight = FontWeight.Bold)
                 }
+            }
+        )
+    }
+
+    if (showPlayFeatureDialog) {
+        PlayFeatureInfoDialog(
+            onDismiss = { showPlayFeatureDialog = false },
+            onStartGameplay = {
+                showPlayFeatureDialog = false
+                onStartGameplayFromApps()
+            },
+            onOpenPermissions = {
+                showPlayFeatureDialog = false
+                onOpenPermissionsTab()
             }
         )
     }

@@ -17,6 +17,7 @@ import com.example.service.ScreenStateBridge
 
 enum class AgentPermissionType {
     ACCESSIBILITY,
+    OVERLAY,
     QUERY_ALL_PACKAGES,
     USAGE_ACCESS,
     MICROPHONE,
@@ -39,8 +40,15 @@ object PermissionHelper {
             AgentPermissionItem(
                 type = AgentPermissionType.ACCESSIBILITY,
                 titleAr = "خدمة إمكانية الوصول (Accessibility)",
-                explanationAr = "تمكّن الوكيل من قراءة محتوى الشاشة الحالية والضغط على الأزرار والتمرير نيابةً عنك للتحقق من كل خطوة وتلخيص التطبيقات، مع التوقف التلقائي عند كلمات المرور والدفع.",
+                explanationAr = "تمكّن الوكيل من قراءة محتوى الشاشة الحالية والضغط على الأزرار والتمرير وتنفيذ إيماءات اللعب نيابةً عنك، مع التوقف التلقائي عند كلمات المرور والدفع.",
                 isGranted = isAccessibilityEnabled(context),
+                isRuntimePermission = false
+            ),
+            AgentPermissionItem(
+                type = AgentPermissionType.OVERLAY,
+                titleAr = "الظهور فوق التطبيقات (SYSTEM_ALERT_WINDOW)",
+                explanationAr = "يسمح بإظهار أزرار تحكم عائمة فوق الألعاب والتطبيقات (إيقاف فوري، إيقاف مؤقت/استئناف، «أكمل بنفسي»، وتصغير) أثناء عمل الوكيل.",
+                isGranted = isOverlayPermissionGranted(context),
                 isRuntimePermission = false
             ),
             AgentPermissionItem(
@@ -136,6 +144,10 @@ object PermissionHelper {
         return alarmManager.canScheduleExactAlarms()
     }
 
+    fun isOverlayPermissionGranted(context: Context): Boolean {
+        return Settings.canDrawOverlays(context)
+    }
+
     fun openPermissionSettings(context: Context, type: AgentPermissionType): Boolean {
         val candidates = buildSettingsCandidateIntents(context, type)
         for (intent in candidates) {
@@ -165,6 +177,11 @@ object PermissionHelper {
             AgentPermissionType.ACCESSIBILITY -> listOf(
                 Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS),
                 Intent(Settings.ACTION_SETTINGS)
+            )
+            AgentPermissionType.OVERLAY -> listOf(
+                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, pkgUri),
+                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION),
+                buildAppDetailsIntent(context)
             )
             AgentPermissionType.USAGE_ACCESS -> listOf(
                 Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS, pkgUri),

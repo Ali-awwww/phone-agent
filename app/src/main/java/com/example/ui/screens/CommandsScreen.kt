@@ -5,15 +5,8 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,90 +21,114 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import android.widget.Toast
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Cancel
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.outlined.Autorenew
-import androidx.compose.material.icons.outlined.MicNone
-import androidx.compose.material.icons.outlined.PendingActions
-import androidx.compose.material.icons.outlined.Schedule
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
+import androidx.compose.material.icons.rounded.AccessibilityNew
+import androidx.compose.material.icons.rounded.Cancel
+import androidx.compose.material.icons.rounded.CloudDone
+import androidx.compose.material.icons.rounded.CloudOff
+import androidx.compose.material.icons.rounded.CloudQueue
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.PanTool
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.SportsEsports
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import com.example.BuildConfig
+import com.example.ui.viewmodel.ModelConnectionStatus
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import com.example.R
-import com.example.model.AgentPlan
-import com.example.model.AgentPlanStep
-import com.example.model.StepActionType
-import com.example.model.StepStatus
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.policy.AgentPromptRules
+import com.example.ui.components.ChatMessageBubble
+import com.example.ui.components.CyberPanelCard
+import com.example.ui.components.CyberPlanCard
+import com.example.ui.components.PlayFeatureInfoDialog
+import com.example.ui.components.PlayWithAgentPromoCard
+import com.example.ui.components.SensitiveStepApprovalDialog
+import com.example.ui.theme.CyberBgDeep
+import com.example.ui.theme.CyberBorderGlow
+import com.example.ui.theme.CyberElectricBlue
+import com.example.ui.theme.CyberElectricCyan
+import com.example.ui.theme.CyberOnCyan
+import com.example.ui.theme.CyberSoftCyan
+import com.example.ui.theme.CyberSurfaceElevated
+import com.example.ui.theme.CyberSurfaceNavy
+import com.example.ui.theme.CyberTextPrimary
+import com.example.ui.theme.CyberTextSecondary
+import com.example.ui.theme.StatusCancelled
+import com.example.ui.theme.StatusCancelledContainer
+import com.example.ui.theme.StatusPending
+import com.example.ui.theme.StatusPendingContainer
+import com.example.ui.theme.StatusSuccess
+import com.example.ui.theme.StatusSuccessContainer
 import com.example.ui.viewmodel.CommandsUiState
 import com.example.ui.viewmodel.CommandsViewModel
-
-// شاشة الأوامر — متوافقة مع CommandsViewModel و CommandsUiState.
-// - زر ميكروفون مدمج (72dp) ونبض خفيف، وأزرار تنفيذ 48dp.
-// - الاقتراحات تُعرض في FlowRow متعدد الأسطر فلا يُقص أي نص.
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun CommandsScreen(
     viewModel: CommandsViewModel,
-    onOpenPermissionsTab: () -> Unit
+    onOpenPermissionsTab: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val state by viewModel.state.collectAsState()
-    val isAccessibilityConnected by viewModel.isAccessibilityConnected.collectAsState()
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val messages by viewModel.messages.collectAsStateWithLifecycle()
+    val activeTasks by viewModel.activeTasks.collectAsStateWithLifecycle()
+    val installedAppsByPackage by viewModel.installedAppsByPackage.collectAsStateWithLifecycle()
+    val isAccessibilityConnected by viewModel.isAccessibilityConnected.collectAsStateWithLifecycle()
+
     val plan = (state.uiState as? CommandsUiState.PlanActive)?.plan
-    val isPlanning = state.uiState is CommandsUiState.Planning
-    val errorMessage = (state.uiState as? CommandsUiState.Error)?.message ?: ""
-    val commandText = state.inputText
     val isRecording = state.isListening
-    val transcriptText = state.partialTranscript
-    val isBusy = isPlanning
-    val isExecutingPlan = state.isExecuting
-    val executionMessage = state.executionTruthReportAr ?: ""
-    val needsApprovalForStep = state.pendingApprovalStep
-    val isPlanComplete = plan?.isComplete == true
+    val isAnyTaskRunning = state.isAnyTaskRunning
+    val canPauseOrTakeOver = state.isExecuting || state.isGameplayRunning
+    val showTaskControlStrip = isAnyTaskRunning || (plan != null && !plan.isComplete && !plan.isCancelled)
+    val listState = rememberLazyListState()
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -122,713 +139,807 @@ fun CommandsScreen(
             viewModel.reportMicPermissionDenied()
         }
     }
+
     val recordPermissionGranted = ContextCompat.checkSelfPermission(
         context,
         Manifest.permission.RECORD_AUDIO
     ) == PackageManager.PERMISSION_GRANTED
 
+    LaunchedEffect(messages.size, plan != null) {
+        val totalItems = messages.size + (if (plan != null) 2 else 1)
+        if (totalItems > 0) {
+            listState.animateScrollToItem(totalItems - 1)
+        }
+    }
+
     val quickSuggestions = listOf(
-        "افتح واتساب وأرسل رسالة ترحيب",
-        "اضبط منبهاً للساعة 7:30 صباحاً",
-        "افتح الإعدادات وابحث عن الشبكة",
-        "ذكّرني بعد 10 دقائق بشرب الماء"
+        "تولّي اللعب",
+        "اعرض ألعابي",
+        "ماذا في شاشتي؟",
+        "ذكّرني بعد 10 دقائق بشرب الماء",
+        "اعرض مهامي",
+        "اضبط منبهاً للساعة 7:30 صباحاً"
     )
 
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-        contentPadding = PaddingValues(vertical = 16.dp)
+    Box(
+        modifier = modifier.fillMaxSize(),
+        contentAlignment = Alignment.TopCenter
     ) {
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                ),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "وكيل الهاتف",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "اطلب بالصوت أو بالكتابة، وسيحوّل الوكيل طلبك إلى خطة واضحة قابلة للمراجعة والتنفيذ خطوة بخطوة.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                }
-            }
-        }
-
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = if (isAccessibilityConnected) {
-                        "خدمة إمكانية الوصول: متصلة"
-                    } else {
-                        "خدمة إمكانية الوصول: غير مفعّلة"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (isAccessibilityConnected) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.error
-                    }
-                )
-                TextButton(onClick = onOpenPermissionsTab) {
-                    Text(text = "الأذونات", fontSize = 13.sp)
-                }
-            }
-        }
-
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = if (state.voiceConversationMode) {
-                        "وضع المحادثة الصوتية: مفعّل"
-                    } else {
-                        "وضع المحادثة الصوتية: متوقف"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                TextButton(onClick = { viewModel.toggleVoiceConversationMode() }) {
-                    Text(text = "تبديل", fontSize = 13.sp)
-                }
-            }
-        }
-
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                ),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                shape = RoundedCornerShape(18.dp)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 20.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(72.dp)
-                            .background(
-                                color = if (isRecording) {
-                                    MaterialTheme.colorScheme.error.copy(alpha = 0.12f)
-                                } else {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                },
-                                shape = CircleShape
-                            )
-                            .border(
-                                width = 1.5.dp,
-                                color = if (isRecording) {
-                                    MaterialTheme.colorScheme.error
-                                } else {
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
-                                },
-                                shape = CircleShape
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = if (isRecording) Icons.Filled.Stop else Icons.Filled.Mic,
-                            contentDescription = if (isRecording) "إيقاف التسجيل" else "بدء التسجيل الصوتي",
-                            tint = if (isRecording) {
-                                MaterialTheme.colorScheme.error
-                            } else {
-                                MaterialTheme.colorScheme.primary
-                            },
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Button(
-                        onClick = {
-                            if (isRecording) {
-                                viewModel.stopVoiceCapture()
-                            } else if (recordPermissionGranted) {
-                                viewModel.startVoiceCapture()
-                            } else {
-                                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            }
-                        },
-                        enabled = !isBusy,
-                        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary
-                        )
-                    ) {
-                        Icon(
-                            imageVector = if (isRecording) Icons.Filled.Stop else Icons.Filled.Mic,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (isRecording) {
-                                "إيقاف التسجيل"
-                            } else {
-                                "اضغط للتحدث"
-                            },
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = if (isRecording) {
-                            "جارٍ التسجيل... اضغط للإيقاف"
-                        } else {
-                            "اضغط على الزر ثم تحدث بوضوح"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center
-                    )
-                    if (transcriptText.isNotBlank()) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = transcriptText,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-                }
-            }
-        }
-
-        item {
-            Text(
-                text = "أو جرّب أحد هذه الأوامر:",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-        }
-
-        item {
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                quickSuggestions.forEach { suggestion ->
-                    FilterChip(
-                        selected = false,
-                        onClick = { viewModel.analyzeAndPlanCommand(suggestion) },
-                        label = {
-                            Text(
-                                text = suggestion,
-                                fontSize = 13.sp,
-                                maxLines = 2
-                            )
-                        },
-                        enabled = true,
-                        colors = FilterChipDefaults.filterChipColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                            labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
-                        ),
-                        border = FilterChipDefaults.filterChipBorder(
-                            enabled = true,
-                            selected = false,
-                            borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
-                        )
-                    )
-                }
-            }
-        }
-
-        item {
-            OutlinedTextField(
-                value = commandText,
-                onValueChange = { viewModel.updateInputText(it) },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text(text = "اكتب أمرك هنا...") },
-                placeholder = { Text(text = "مثال: افتح واتساب وأرسل رسالة") },
-                singleLine = false,
-                minLines = 2,
-                maxLines = 4,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
-                )
-            )
-        }
-
-        item {
-            Button(
-                onClick = { viewModel.analyzeAndPlanCommand() },
-                enabled = commandText.isNotBlank() && !isBusy && !isExecutingPlan,
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .widthIn(max = 680.dp)
+                .padding(horizontal = 12.dp)
+        ) {
+            // شريط علوي للدردشة مع حالة إمكانية الوصول والصوت وزر «تولّي اللعب»
+            Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary
-                )
+                    .padding(top = 6.dp),
+                shape = MaterialTheme.shapes.small,
+                color = CyberSurfaceNavy,
+                border = BorderStroke(1.dp, CyberBorderGlow)
             ) {
-                if (isBusy) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                } else {
-                    Icon(
-                        imageVector = Icons.Filled.Add,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                }
-                Text(
-                    text = if (isBusy) "جارٍ تحليل الأمر..." else "تحليل وتجهيز الخطة",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
-        }
-
-        if (state.lastSpokenReply.isNotBlank()) {
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer
-                    ),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Text(
-                            text = "رد الوكيل:",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = state.lastSpokenReply,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                    }
-                }
-            }
-        }
-
-        if (errorMessage.isNotBlank()) {
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer
-                    ),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Cancel,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onErrorContainer,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = errorMessage,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onErrorContainer
-                        )
-                    }
-                }
-            }
-        }
-
-        if (plan != null) {
-            item {
-                PlanSection(
-                    plan = plan,
-                    isExecuting = isExecutingPlan,
-                    isPlanComplete = isPlanComplete,
-                    executionMessage = executionMessage,
-                    onNewPlan = { viewModel.resetToIdle() },
-                    onExecutePlan = { viewModel.executePlanStepByStep() },
-                    onCancelExecution = { viewModel.cancelActivePlan() }
-                )
-            }
-        }
-    }
-
-    needsApprovalForStep?.let { step ->
-        AlertDialog(
-            onDismissRequest = { viewModel.resolveApproval(false) },
-            title = {
-                Text(
-                    text = "موافقة مطلوبة",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-            },
-            text = {
-                Column {
-                    Text(
-                        text = step.titleAr,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = step.descriptionAr,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    if (step.safetyReasonAr.isNotBlank()) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "السبب: ${step.safetyReasonAr}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = { viewModel.resolveApproval(true) },
-                    modifier = Modifier.height(48.dp)
-                ) {
-                    Text(text = "تنفيذ", fontSize = 14.sp)
-                }
-            },
-            dismissButton = {
-                OutlinedButton(
-                    onClick = { viewModel.resolveApproval(false) },
-                    modifier = Modifier.height(48.dp)
-                ) {
-                    Text(text = "إلغاء", fontSize = 14.sp)
-                }
-            }
-        )
-    }
-}
-
-@Composable
-private fun PlanSection(
-    plan: AgentPlan,
-    isExecuting: Boolean,
-    isPlanComplete: Boolean,
-    executionMessage: String,
-    onNewPlan: () -> Unit,
-    onExecutePlan: () -> Unit,
-    onCancelExecution: () -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-        shape = RoundedCornerShape(16.dp)
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "خطة التنفيذ",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "${plan.steps.size} خطوات",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = plan.understandingSummaryAr,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-
-            AnimatedVisibility(visible = isExecuting) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 4.dp),
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "جارٍ تنفيذ الخطوات...",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = "دردشة الوكيل",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = CyberElectricCyan
+                        )
+                        Surface(
+                            modifier = Modifier.clickable(onClick = onOpenPermissionsTab),
+                            shape = MaterialTheme.shapes.small,
+                            color = if (isAccessibilityConnected) StatusSuccessContainer else StatusPendingContainer,
+                            border = BorderStroke(
+                                1.dp,
+                                if (isAccessibilityConnected) StatusSuccess else StatusPending
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.AccessibilityNew,
+                                    contentDescription = "حالة إمكانية الوصول",
+                                    tint = if (isAccessibilityConnected) StatusSuccess else StatusPending,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    text = if (isAccessibilityConnected) "متصل" else "تفعيل الأذونات",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isAccessibilityConnected) StatusSuccess else StatusPending
+                                )
+                            }
+                        }
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = { viewModel.startGameplayGoal() },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("header_take_over_play_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.SportsEsports,
+                                contentDescription = "تولّي اللعب",
+                                tint = CyberElectricCyan
+                            )
+                        }
+                        IconButton(
+                            onClick = { viewModel.toggleVoiceConversationMode() },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("toggle_tts_button")
+                        ) {
+                            Icon(
+                                imageVector = if (state.voiceConversationMode) {
+                                    Icons.AutoMirrored.Rounded.VolumeUp
+                                } else {
+                                    Icons.AutoMirrored.Rounded.VolumeOff
+                                },
+                                contentDescription = if (state.voiceConversationMode) {
+                                    "إيقاف النطق التلقائي"
+                                } else {
+                                    "تفعيل النطق التلقائي"
+                                },
+                                tint = if (state.voiceConversationMode) CyberElectricCyan else CyberTextSecondary
+                            )
+                        }
+                        if (messages.isNotEmpty()) {
+                            IconButton(
+                                onClick = { viewModel.clearChatHistory() },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("clear_chat_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.DeleteSweep,
+                                    contentDescription = "مسح سجل الدردشة",
+                                    tint = CyberTextSecondary
+                                )
+                            }
+                        }
+                    }
                 }
             }
-            if (executionMessage.isNotBlank()) {
-                Text(
-                    text = executionMessage,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(vertical = 4.dp)
-                )
+
+            // بطاقة حالة اتصال النموذج بـ Gemini مع فحص الاتصال وعرض رمز التصحيح
+            ModelConnectionCard(
+                status = state.modelConnectionStatus,
+                appCheckDebugToken = state.appCheckDebugToken,
+                activeProjectId = state.activeProjectId,
+                isExpanded = state.isModelStatusExpanded,
+                onToggleExpand = { viewModel.toggleModelStatusExpanded() },
+                onCheckConnection = { viewModel.checkModelConnection() },
+                modifier = Modifier.padding(top = 6.dp)
+            )
+
+            // شريط التحكم الفوري بالوكيل داخل شاشة الدردشة (إيقاف فوري / إيقاف مؤقت-استئناف / إلغاء المهمة / أكمل بنفسي)
+            AnimatedVisibility(visible = showTaskControlStrip) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    shape = MaterialTheme.shapes.small,
+                    color = if (state.isPaused) StatusPendingContainer else StatusCancelledContainer,
+                    border = BorderStroke(
+                        1.5.dp,
+                        if (state.isPaused) StatusPending else StatusCancelled
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (isAnyTaskRunning && !state.isPaused) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = CyberElectricCyan
+                                )
+                            }
+                            Text(
+                                text = state.statusNoticeAr.ifBlank {
+                                    if (state.isPaused) "المهمة متوقفة مؤقتاً — بانتظارك"
+                                    else AgentPromptRules.WAIT_THINKING_NOTICE_AR
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = CyberTextPrimary
+                            )
+                        }
+
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Button(
+                                onClick = { viewModel.stopCurrentTask() },
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("stop_active_task_button"),
+                                shape = MaterialTheme.shapes.small,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = StatusCancelled,
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(horizontal = 14.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Stop,
+                                    contentDescription = "إيقاف المهمة فوراً",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(text = "إيقاف", fontWeight = FontWeight.Bold)
+                            }
+
+                            if (canPauseOrTakeOver) {
+                                Button(
+                                    onClick = { viewModel.togglePauseResume() },
+                                    modifier = Modifier
+                                        .height(48.dp)
+                                        .testTag("pause_resume_task_button"),
+                                    shape = MaterialTheme.shapes.small,
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (state.isPaused) StatusSuccess else CyberElectricBlue,
+                                        contentColor = Color.White
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 14.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (state.isPaused) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
+                                        contentDescription = if (state.isPaused) "استئناف" else "إيقاف مؤقت",
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        text = if (state.isPaused) "استئناف" else "إيقاف مؤقت",
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                OutlinedButton(
+                                    onClick = { viewModel.handOverControlToUser() },
+                                    modifier = Modifier
+                                        .height(48.dp)
+                                        .testTag("user_takeover_button"),
+                                    shape = MaterialTheme.shapes.small,
+                                    border = BorderStroke(1.dp, CyberElectricCyan),
+                                    contentPadding = PaddingValues(horizontal = 12.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.PanTool,
+                                        contentDescription = "أكمل بنفسي",
+                                        tint = CyberElectricCyan,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(text = "أكمل بنفسي", color = CyberElectricCyan)
+                                }
+                            }
+
+                            OutlinedButton(
+                                onClick = { viewModel.cancelCurrentTask() },
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("cancel_current_task_button"),
+                                shape = MaterialTheme.shapes.small,
+                                border = BorderStroke(1.dp, StatusCancelled),
+                                contentPadding = PaddingValues(horizontal = 12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Cancel,
+                                    contentDescription = "إلغاء المهمة الحالية",
+                                    tint = StatusCancelled,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(text = "إلغاء المهمة", color = StatusCancelled)
+                            }
+                        }
+                    }
+                }
             }
 
-            plan.steps.forEach { step ->
-                StepRow(step = step, isExecuting = isExecuting)
-                Spacer(modifier = Modifier.height(8.dp))
+            // منطقة فقاعات الدردشة + الخطة النشطة
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentPadding = PaddingValues(vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                item(key = "feature_spotlight_header") {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (messages.isEmpty()) {
+                            CyberPanelCard(modifier = Modifier.fillMaxWidth()) {
+                                Column(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = "أهلاً بك في دردشة وكيل الهاتف",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = CyberElectricCyan
+                                    )
+                                    Text(
+                                        text = "جميع الميزات مجانية 100%: الدردشة النصية والصوتية، عرض ألعابك وتطبيقاتك وتشغيلها، قراءة شاشتك الحقيقية، إدارة المهام والتذكيرات والمنبهات، وتنفيذ الأوامر خطوة بخطوة. تذكّر أن الوكيل ليس لحظياً ويحتاج بضع ثوانٍ للتفكير في كل خطوة.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = CyberTextSecondary
+                                    )
+                                }
+                            }
+                        }
+                        PlayWithAgentPromoCard(
+                            onTakeOverPlayClick = { viewModel.startGameplayGoal() },
+                            onExplainFeatureClick = { viewModel.openPlayFeatureDialog() },
+                            compact = messages.isNotEmpty()
+                        )
+                    }
+                }
+
+                items(messages, key = { it.id }) { msg ->
+                    ChatMessageBubble(
+                        message = msg,
+                        installedAppsByPackage = installedAppsByPackage,
+                        liveActiveTasks = activeTasks,
+                        onLaunchApp = { pkg, label -> viewModel.launchAppFromChat(pkg, label) },
+                        onToggleTaskCompleted = { id, done -> viewModel.toggleTaskCompleted(id, done) },
+                        onCancelTask = { id -> viewModel.cancelTaskById(id) },
+                        onTakeOverPlayClick = { viewModel.startGameplayGoal() },
+                        onExplainFeatureClick = { viewModel.openPlayFeatureDialog() }
+                    )
+                }
+
+                if (plan != null) {
+                    item(key = "active_plan_section") {
+                        CyberPlanCard(
+                            plan = plan,
+                            isExecuting = state.isExecuting,
+                            isPlanComplete = plan.isComplete,
+                            executionMessage = state.executionTruthReportAr.orEmpty(),
+                            onNewPlan = { viewModel.resetToIdle() },
+                            onExecutePlan = { viewModel.executePlanStepByStep() },
+                            onCancelExecution = { viewModel.cancelCurrentTask() }
+                        )
+                    }
+                }
             }
 
-            Spacer(modifier = Modifier.height(4.dp))
-            Button(
-                onClick = onExecutePlan,
-                enabled = !isExecuting,
+            // اقتراحات سريعة قابلة للضغط الفوري
+            LazyRow(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary
-                )
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.PlayArrow,
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = if (isPlanComplete) "إعادة تنفيذ الخطة" else "تنفيذ الخطة",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
+                    .padding(bottom = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                OutlinedButton(
-                    onClick = onNewPlan,
-                    enabled = !isExecuting,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Refresh,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
+                items(quickSuggestions) { suggestion ->
+                    FilterChip(
+                        selected = false,
+                        onClick = { viewModel.analyzeAndPlanCommand(suggestion) },
+                        shape = MaterialTheme.shapes.small,
+                        colors = FilterChipDefaults.filterChipColors(
+                            containerColor = CyberSurfaceNavy,
+                            labelColor = CyberSoftCyan
+                        ),
+                        border = BorderStroke(1.dp, CyberBorderGlow),
+                        label = {
+                            Text(
+                                text = suggestion,
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1
+                            )
+                        }
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(text = "خطة جديدة", fontSize = 14.sp)
-                }
-                if (isExecuting) {
-                    OutlinedButton(
-                        onClick = onCancelExecution,
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = MaterialTheme.colorScheme.error
-                        )
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Cancel,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(text = "إلغاء التنفيذ", fontSize = 14.sp)
-                    }
                 }
             }
-        }
-    }
-}
 
-@Composable
-private fun StepRow(step: AgentPlanStep, isExecuting: Boolean) {
-    val isDone = step.status == StepStatus.COMPLETED
-    val isCurrent = isExecuting && step.status == StepStatus.RUNNING
-    val isFailed = step.status == StepStatus.FAILED
-    val stepIcon = when (step.actionType) {
-        StepActionType.OPEN_APP -> Icons.Filled.Add
-        StepActionType.SEARCH_IN_APP -> Icons.Filled.Add
-        StepActionType.SET_ALARM -> Icons.Outlined.Schedule
-        StepActionType.SET_REMINDER -> Icons.Outlined.Schedule
-        StepActionType.SEND_MESSAGE -> Icons.Filled.Send
-        StepActionType.CHANGE_SETTING -> Icons.Filled.Settings
-        StepActionType.TAP_ELEMENT -> Icons.Filled.Add
-        StepActionType.INPUT_TEXT -> Icons.Filled.Add
-        StepActionType.SCROLL_SCREEN -> Icons.Outlined.Autorenew
-        StepActionType.READ_SCREEN_AND_SUMMARIZE -> Icons.Outlined.PendingActions
-        StepActionType.WAIT_AND_VERIFY -> Icons.Outlined.Autorenew
-        StepActionType.SPEAK_ANSWER -> Icons.Filled.Mic
-    }
-
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        color = when {
-            isFailed -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
-            isDone -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
-            isCurrent -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f)
-            else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-        }
-    ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.Top
-        ) {
+            // شريط إدخال الصوت والكتابة السفلي
             Surface(
-                shape = CircleShape,
-                color = when {
-                    isFailed -> MaterialTheme.colorScheme.error
-                    isDone -> MaterialTheme.colorScheme.primary
-                    isCurrent -> MaterialTheme.colorScheme.tertiary
-                    else -> MaterialTheme.colorScheme.outline
-                }
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+                shape = RoundedCornerShape(16.dp),
+                color = CyberSurfaceNavy,
+                border = BorderStroke(
+                    1.dp,
+                    if (isRecording) StatusCancelled else CyberBorderGlow
+                )
             ) {
-                Box(
-                    modifier = Modifier.size(32.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (isDone) {
-                        Icon(
-                            imageVector = Icons.Filled.CheckCircle,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    } else if (isFailed) {
-                        Icon(
-                            imageVector = Icons.Filled.Cancel,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onError,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    } else {
-                        Icon(
-                            imageVector = stepIcon,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
-            }
-            Spacer(modifier = Modifier.width(10.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "${step.stepNumber}. ${step.titleAr}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = step.descriptionAr,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = "الحالة: ${step.status.labelAr}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (isFailed) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    }
-                )
-                if (step.targetAppName.isNotBlank() || step.targetQueryOrText.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        AppImagePlaceholder(
-                            packageName = "",
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
+                Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                    if (isRecording) {
                         Text(
-                            text = listOf(step.targetAppName, step.targetQueryOrText)
-                                .filter { it.isNotBlank() }
-                                .joinToString(" — "),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            text = if (state.partialTranscript.isNotBlank()) {
+                                "أسمعك: ${state.partialTranscript}"
+                            } else {
+                                "جارٍ الاستماع... اضغط زر الإيقاف لإنهاء التسجيل"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = StatusCancelled,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
                         )
                     }
-                }
-                if (step.requiresApproval) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "تتطلب موافقتك قبل التنفيذ",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.error
-                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        IconButton(
+                            onClick = {
+                                if (isRecording) {
+                                    viewModel.stopVoiceCapture()
+                                } else if (recordPermissionGranted) {
+                                    viewModel.startVoiceCapture()
+                                } else {
+                                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                            },
+                            enabled = !isAnyTaskRunning || isRecording,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("voice_capture_button"),
+                            colors = IconButtonDefaults.iconButtonColors(
+                                containerColor = if (isRecording) StatusCancelledContainer else CyberSurfaceElevated,
+                                contentColor = if (isRecording) StatusCancelled else CyberElectricCyan
+                            )
+                        ) {
+                            Icon(
+                                imageVector = if (isRecording) Icons.Rounded.Stop else Icons.Rounded.Mic,
+                                contentDescription = if (isRecording) "إيقاف التسجيل" else "التحدث بالصوت"
+                            )
+                        }
+
+                        OutlinedTextField(
+                            value = state.inputText,
+                            onValueChange = { viewModel.updateInputText(it) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("chat_text_input"),
+                            placeholder = {
+                                Text(
+                                    text = "اكتب رسالتك أو أمرك...",
+                                    color = CyberTextSecondary,
+                                    maxLines = 1
+                                )
+                            },
+                            singleLine = false,
+                            maxLines = 3,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(
+                                onSend = {
+                                    if (state.inputText.isNotBlank() && !isAnyTaskRunning) {
+                                        viewModel.analyzeAndPlanCommand()
+                                    }
+                                }
+                            ),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = CyberElectricCyan,
+                                unfocusedBorderColor = Color.Transparent,
+                                focusedContainerColor = CyberBgDeep,
+                                unfocusedContainerColor = CyberBgDeep,
+                                focusedTextColor = CyberTextPrimary,
+                                unfocusedTextColor = CyberTextPrimary
+                            ),
+                            shape = MaterialTheme.shapes.small
+                        )
+
+                        Surface(
+                            shape = CircleShape,
+                            color = if (state.inputText.isNotBlank() && !isAnyTaskRunning) {
+                                CyberElectricCyan
+                            } else {
+                                CyberSurfaceElevated
+                            }
+                        ) {
+                            IconButton(
+                                onClick = { viewModel.analyzeAndPlanCommand() },
+                                enabled = state.inputText.isNotBlank() && !isAnyTaskRunning,
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("chat_send_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.Send,
+                                    contentDescription = "إرسال",
+                                    tint = if (state.inputText.isNotBlank() && !isAnyTaskRunning) {
+                                        CyberOnCyan
+                                    } else {
+                                        CyberTextSecondary
+                                    }
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
     }
+
+    state.pendingApprovalStep?.let { step ->
+        SensitiveStepApprovalDialog(
+            step = step,
+            fullPlan = state.pendingApprovalPlan,
+            onApprove = { viewModel.resolveApproval(true) },
+            onReject = { viewModel.resolveApproval(false) }
+        )
+    }
+
+    if (state.showPlayFeatureDialog) {
+        PlayFeatureInfoDialog(
+            onDismiss = { viewModel.dismissPlayFeatureDialog() },
+            onStartGameplay = {
+                viewModel.startGameplayGoal()
+            },
+            onOpenPermissions = {
+                viewModel.dismissPlayFeatureDialog()
+                onOpenPermissionsTab()
+            }
+        )
+    }
 }
 
 @Composable
-fun AppImagePlaceholder(
-    packageName: String,
+fun ModelConnectionCard(
+    status: ModelConnectionStatus,
+    appCheckDebugToken: String,
+    activeProjectId: String,
+    isExpanded: Boolean,
+    onToggleExpand: () -> Unit,
+    onCheckConnection: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+
+    val borderColor = when (status) {
+        is ModelConnectionStatus.Connected -> StatusSuccess
+        is ModelConnectionStatus.Checking -> CyberElectricCyan
+        is ModelConnectionStatus.Disconnected -> StatusCancelled
+        ModelConnectionStatus.NotChecked -> CyberBorderGlow
+    }
+
+    val containerColor = when (status) {
+        is ModelConnectionStatus.Connected -> StatusSuccessContainer
+        is ModelConnectionStatus.Checking -> CyberSurfaceNavy
+        is ModelConnectionStatus.Disconnected -> StatusCancelledContainer
+        ModelConnectionStatus.NotChecked -> CyberSurfaceNavy
+    }
+
     Surface(
-        modifier = modifier.size(28.dp),
-        shape = RoundedCornerShape(8.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("model_connection_card"),
+        shape = MaterialTheme.shapes.small,
+        color = containerColor,
+        border = BorderStroke(1.dp, borderColor)
     ) {
-        Image(
-            painter = painterResource(id = R.drawable.ic_launcher_foreground),
-            contentDescription = packageName.ifBlank { "أيقونة التطبيق" },
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize()
-        )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    when (status) {
+                        is ModelConnectionStatus.Connected -> {
+                            Icon(
+                                imageVector = Icons.Rounded.CloudDone,
+                                contentDescription = "متصل",
+                                tint = StatusSuccess,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = "النموذج متصل (Gemini 3.8 Flash)",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = StatusSuccess
+                                )
+                                Text(
+                                    text = "زمن الاستجابة: ${status.latencyMs}ms",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = CyberTextSecondary
+                                )
+                            }
+                        }
+                        is ModelConnectionStatus.Checking -> {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = CyberElectricCyan
+                            )
+                            Text(
+                                text = "جارٍ فحص اتصال النموذج بـ Gemini...",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = CyberElectricCyan
+                            )
+                        }
+                        is ModelConnectionStatus.Disconnected -> {
+                            Icon(
+                                imageVector = Icons.Rounded.CloudOff,
+                                contentDescription = "غير متصل",
+                                tint = StatusCancelled,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = "النموذج غير متصل [${status.category.titleAr}]",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = StatusCancelled
+                                )
+                                Text(
+                                    text = status.exactError.take(45),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = CyberTextSecondary,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                        ModelConnectionStatus.NotChecked -> {
+                            Icon(
+                                imageVector = Icons.Rounded.CloudQueue,
+                                contentDescription = "لم يفحص",
+                                tint = CyberTextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Text(
+                                text = "اتصال النموذج لم يُفحص بعد",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = CyberTextSecondary
+                            )
+                        }
+                    }
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = onCheckConnection,
+                        enabled = status !is ModelConnectionStatus.Checking,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .testTag("check_model_connection_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = "فحص اتصال النموذج",
+                            tint = CyberElectricCyan,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    IconButton(
+                        onClick = onToggleExpand,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .testTag("toggle_model_connection_details_button")
+                    ) {
+                        Icon(
+                            imageVector = if (isExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                            contentDescription = if (isExpanded) "إخفاء التفاصيل" else "عرض التفاصيل",
+                            tint = CyberTextSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+
+            AnimatedVisibility(visible = isExpanded || status is ModelConnectionStatus.Disconnected) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (status is ModelConnectionStatus.Disconnected) {
+                        Text(
+                            text = status.explanationAr,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = CyberTextPrimary
+                        )
+                        Surface(
+                            shape = MaterialTheme.shapes.small,
+                            color = CyberBgDeep,
+                            border = BorderStroke(1.dp, CyberBorderGlow)
+                        ) {
+                            Text(
+                                text = status.exactError,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CyberSoftCyan,
+                                modifier = Modifier.padding(8.dp)
+                            )
+                        }
+                    }
+
+                    if (BuildConfig.DEBUG && appCheckDebugToken.isNotBlank()) {
+                        Surface(
+                            shape = MaterialTheme.shapes.small,
+                            color = CyberBgDeep,
+                            border = BorderStroke(1.dp, CyberBorderGlow)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Key,
+                                            contentDescription = null,
+                                            tint = CyberElectricCyan,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = "رمز تصحيح App Check (المعاينة):",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = CyberElectricCyan
+                                        )
+                                    }
+                                    Button(
+                                        onClick = {
+                                            clipboardManager.setText(AnnotatedString(appCheckDebugToken))
+                                            Toast.makeText(context, "تم نسخ رمز التصحيح إلى الحافظة", Toast.LENGTH_SHORT).show()
+                                        },
+                                        modifier = Modifier
+                                            .height(32.dp)
+                                            .testTag("copy_debug_token_button"),
+                                        shape = MaterialTheme.shapes.small,
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = CyberElectricCyan,
+                                            contentColor = CyberOnCyan
+                                        ),
+                                        contentPadding = PaddingValues(horizontal = 8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.ContentCopy,
+                                            contentDescription = "نسخ",
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(
+                                            text = "نسخ الرمز",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+
+                                Surface(
+                                    shape = MaterialTheme.shapes.small,
+                                    color = CyberSurfaceNavy,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = appCheckDebugToken,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Medium,
+                                        color = CyberSoftCyan,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                                    )
+                                }
+
+                                val displayProject = if (activeProjectId.isNotBlank() && activeProjectId != "gen-lang-client-0140553990") {
+                                    "gen-lang-client-0140553990 (المشروع الحالي: $activeProjectId)"
+                                } else {
+                                    "gen-lang-client-0140553990"
+                                }
+
+                                Text(
+                                    text = "📌 لتفعيل ردود Gemini في المعاينة:\n1. افتح Firebase Console للمشروع: $displayProject\n2. اذهب إلى App Check ⬅ Apps ⬅ com.aistudio.phoneagent.wakeel\n3. اضغط «Manage debug tokens» وألصق هذا الرمز ثم احفظ.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = CyberTextSecondary
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

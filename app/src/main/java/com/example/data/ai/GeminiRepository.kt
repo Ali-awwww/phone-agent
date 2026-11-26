@@ -1,49 +1,42 @@
 package com.example.data.ai
 
-import android.util.Log
 import com.example.model.AgentPlan
 import com.example.model.AgentPlanStep
 import com.example.model.AppFolder
 import com.example.model.ScreenSnapshot
 import com.example.model.ScreenVerificationResult
 import com.example.model.StepActionType
-import com.example.security.ensureAppCheckToken
+import com.example.security.AppCheckTokenClient
+import com.example.security.AppCheckVerificationException
+import com.example.security.DEFAULT_APP_CHECK_RETRY_DELAY_MS
+import com.example.security.ERROR_APP_CHECK_EXHAUSTED_AR
+import com.example.security.FirebaseAppCheckClient
+import com.example.security.MAX_APP_CHECK_ATTEMPTS
 import com.example.security.isAppCheckTokenError
-import com.example.security.refreshAppCheckToken
+import com.example.security.safeLogE
+import com.example.security.safeLogW
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Schema
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 
 private const val TAG = "GeminiRepository"
 
-class GeminiRepository {
+internal interface GeminiModelClient {
+    suspend fun generatePlanJson(prompt: String): String
+    suspend fun generateAudioPlanJson(audioBytes: ByteArray, mimeType: String, prompt: String): String
+    suspend fun generateVerificationJson(prompt: String): String
+    suspend fun generateCategorizationJson(prompt: String): String
+    suspend fun generateGeneralArabicText(prompt: String): String
+    suspend fun pingModelTest(): String = generateGeneralArabicText("اختبار اتصال سريع: رد بكلمة واحدة «متصل».")
+}
 
-    /**
-     * Runs a Gemini (Firebase AI Logic) call. Before the first attempt it
-     * makes sure an App Check token exists, and when Firebase AI Logic
-     * rejects the token ("Firebase App Check token is invalid") it forces
-     * a fresh Play Integrity token once and retries the call once.
-     * Without this, a stale token cached under the previous provider
-     * failed every command with no recovery (v1.0.2).
-     */
-    private suspend fun <T> withAppCheckRetry(block: suspend () -> T): T {
-        ensureAppCheckToken()
-        return try {
-            block()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            if (!isAppCheckTokenError(e)) throw e
-            Log.w(TAG, "Gemini call rejected the App Check token; forcing a refresh and retrying once.", e)
-            refreshAppCheckToken()
-            block()
-        }
-    }
+private class FirebaseGeminiModelClient : GeminiModelClient {
 
     private fun buildStepsArraySchema(): Schema = Schema.array(
         items = Schema.obj(
@@ -190,6 +183,137 @@ class GeminiRepository {
         )
     }
 
+    override suspend fun generatePlanJson(prompt: String): String {
+        val response = plannerModel.generateContent(prompt)
+        return response.text ?: throw IllegalStateException("لم يُرجع النموذج استجابة صالحة.")
+    }
+
+    override suspend fun generateAudioPlanJson(
+        audioBytes: ByteArray,
+        mimeType: String,
+        prompt: String
+    ): String {
+        val response = audioPlannerModel.generateContent(
+            content {
+                inlineData(audioBytes, mimeType)
+                text(prompt)
+            }
+        )
+        return response.text ?: throw IllegalStateException("لم يتم استلام رد من النموذج الصوتي.")
+    }
+
+    override suspend fun generateVerificationJson(prompt: String): String {
+        val response = verifierModel.generateContent(prompt)
+        return response.text ?: "{}"
+    }
+
+    override suspend fun generateCategorizationJson(prompt: String): String {
+        val response = categorizerModel.generateContent(prompt)
+        return response.text ?: "{}"
+    }
+
+    override suspend fun generateGeneralArabicText(prompt: String): String {
+        val response = generalArabicModel.generateContent(prompt)
+        return response.text?.trim() ?: throw IllegalStateException("لم يُرجع النموذج ملخصاً.")
+    }
+
+    override suspend fun pingModelTest(): String {
+        return generateGeneralArabicText("اختبار اتصال سريع: رد بكلمة واحدة «متصل».")
+    }
+}
+
+class GeminiRepository internal constructor(
+    private val appCheckClient: AppCheckTokenClient,
+    private val modelClient: GeminiModelClient,
+    private val maxAppCheckAttempts: Int = MAX_APP_CHECK_ATTEMPTS,
+    private val retryDelayMs: Long = DEFAULT_APP_CHECK_RETRY_DELAY_MS,
+    private val delayFn: suspend (Long) -> Unit = { delay(it) }
+) {
+    constructor(
+        appCheckClient: AppCheckTokenClient = FirebaseAppCheckClient()
+    ) : this(
+        appCheckClient = appCheckClient,
+        modelClient = FirebaseGeminiModelClient()
+    )
+
+    /**
+     * Self-healing Firebase App Check wrapper for every Gemini call:
+     * 1. Awaits App Check token completion synchronously before sending any Gemini request.
+     * 2. Treats a non-empty token as unverified until Gemini accepts the call; if Gemini fails
+     *    with an App Check error (or token acquisition fails), it is treated as rejection.
+     * 3. Clears stored App Check caches (debug store & App Check preferences), delays briefly,
+     *    and retries with forced `getToken(true)` up to [maxAppCheckAttempts] (3) attempts.
+     * 4. Never silently ignores exhaustion: throws [AppCheckVerificationException] with a clear
+     *    Arabic user-facing message.
+     */
+    internal suspend fun <T> withAppCheckRecovery(block: suspend () -> T): T {
+        require(maxAppCheckAttempts >= 1) { "maxAppCheckAttempts must be at least 1" }
+        var lastError: Throwable? = null
+
+        for (attempt in 1..maxAppCheckAttempts) {
+            val forceRefresh = attempt > 1
+            var failure: Throwable? = null
+
+            val token = try {
+                appCheckClient.getToken(forceRefresh = forceRefresh).also { fetched ->
+                    if (fetched.isBlank()) {
+                        throw AppCheckVerificationException("أعاد Firebase App Check رمزاً فارغاً.")
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failure = e
+                null
+            }
+
+            if (failure == null && token != null) {
+                try {
+                    return block()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (!isAppCheckTokenError(e)) {
+                        throw e
+                    }
+                    failure = e
+                }
+            }
+
+            lastError = failure
+            safeLogW(
+                TAG,
+                "App Check failed on attempt $attempt/$maxAppCheckAttempts: ${failure?.message}",
+                failure
+            )
+
+            if (attempt < maxAppCheckAttempts) {
+                try {
+                    appCheckClient.clearStoredTokens()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (clearErr: Exception) {
+                    safeLogE(TAG, "Failed to clear stored App Check tokens before retry.", clearErr)
+                }
+
+                val waitMs = retryDelayMs * attempt
+                if (waitMs > 0L) {
+                    delayFn(waitMs)
+                }
+            }
+        }
+
+        safeLogE(
+            TAG,
+            "Exhausted all $maxAppCheckAttempts App Check recovery attempts.",
+            lastError
+        )
+        throw AppCheckVerificationException(
+            message = ERROR_APP_CHECK_EXHAUSTED_AR,
+            cause = lastError
+        )
+    }
+
     suspend fun generateCommandPlan(
         userCommand: String,
         installedAppNames: List<String>,
@@ -203,17 +327,16 @@ class GeminiRepository {
                 appendLine("أنشئ خطة تنفيذ دقيقة خطوة بخطوة بصيغة JSON حسب المخطط المطلوب.")
             }
 
-            val response = withAppCheckRetry {
+            val jsonText = withAppCheckRecovery {
                 withTimeout(60_000L) {
-                    plannerModel.generateContent(prompt)
+                    modelClient.generatePlanJson(prompt)
                 }
             }
-            val jsonText = response.text ?: throw IllegalStateException("لم يُرجع النموذج استجابة صالحة.")
             return parsePlanJson(userCommand, JSONObject(jsonText))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to generate command plan", e)
+            safeLogE(TAG, "Failed to generate command plan", e)
             throw e
         }
     }
@@ -228,17 +351,11 @@ class GeminiRepository {
                 appendLine("استمع إلى التسجيل الصوتي للمستخدم باللغة العربية، اكتب النص المفهوم في transcriptAr، ثم أنشئ خطة الخطوات التنفيذية.")
                 appendLine("التطبيقات المتاحة: ${installedAppNames.take(40).joinToString("، ")}")
             }
-            val response = withAppCheckRetry {
+            val jsonText = withAppCheckRecovery {
                 withTimeout(60_000L) {
-                    audioPlannerModel.generateContent(
-                        content {
-                            inlineData(audioBytes, mimeType)
-                            text(prompt)
-                        }
-                    )
+                    modelClient.generateAudioPlanJson(audioBytes, mimeType, prompt)
                 }
             }
-            val jsonText = response.text ?: throw IllegalStateException("لم يتم استلام رد من النموذج الصوتي.")
             val json = JSONObject(jsonText)
             val transcript = json.optString("transcriptAr", "").ifBlank { "أمر صوتي" }
             val plan = parsePlanJson(transcript, json)
@@ -246,7 +363,7 @@ class GeminiRepository {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to process audio command", e)
+            safeLogE(TAG, "Failed to process audio command", e)
             throw e
         }
     }
@@ -276,12 +393,12 @@ class GeminiRepository {
                 appendLine("محتوى الشاشة المرصود الآن:")
                 appendLine(snapshot.toCompactPromptText())
             }
-            val response = withAppCheckRetry {
+            val jsonText = withAppCheckRecovery {
                 withTimeout(45_000L) {
-                    verifierModel.generateContent(prompt)
+                    modelClient.generateVerificationJson(prompt)
                 }
             }
-            val json = JSONObject(response.text ?: "{}")
+            val json = JSONObject(jsonText)
             ScreenVerificationResult(
                 verified = json.optBoolean("verified", true),
                 explanationAr = json.optString("explanationAr", "تم فحص الشاشة بنجاح."),
@@ -291,10 +408,10 @@ class GeminiRepository {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Screen verification failed", e)
+            safeLogE(TAG, "Screen verification failed", e)
             ScreenVerificationResult(
                 verified = false,
-                explanationAr = "تعذر التحقق التلقائي من الشاشة: ${e.localizedMessage ?: "خطأ في الاتصال"}",
+                explanationAr = "تعذر التحقق التلقائي من الشاشة: ${e.message ?: e.localizedMessage ?: "خطأ في الاتصال"}",
                 suggestedFixAr = "تأكد من حالة الشاشة ثم اختر متابعة أو إلغاء."
             )
         }
@@ -319,17 +436,15 @@ class GeminiRepository {
                 $joined
             """.trimIndent()
 
-            val response = withAppCheckRetry {
+            return withAppCheckRecovery {
                 withTimeout(60_000L) {
-                    generalArabicModel.generateContent(prompt)
+                    modelClient.generateGeneralArabicText(prompt)
                 }
             }
-            return response.text?.trim()
-                ?: throw IllegalStateException("لم يُرجع النموذج ملخصاً.")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to summarize app", e)
+            safeLogE(TAG, "Failed to summarize app", e)
             throw e
         }
     }
@@ -347,12 +462,12 @@ class GeminiRepository {
                 $formatted
             """.trimIndent()
 
-            val response = withAppCheckRetry {
+            val jsonText = withAppCheckRecovery {
                 withTimeout(60_000L) {
-                    categorizerModel.generateContent(prompt)
+                    modelClient.generateCategorizationJson(prompt)
                 }
             }
-            val json = JSONObject(response.text ?: "{}")
+            val json = JSONObject(jsonText)
             val array = json.optJSONArray("assignments") ?: return emptyMap()
             val result = mutableMapOf<String, String>()
             for (i in 0 until array.length()) {
@@ -367,7 +482,7 @@ class GeminiRepository {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "App categorization failed", e)
+            safeLogE(TAG, "App categorization failed", e)
             throw e
         }
     }
@@ -379,18 +494,29 @@ class GeminiRepository {
                 سياق الحالة الحالية: $contextSummary
                 أجب برد عربي طبيعي ومختصر ومفيد كأنك تتحدث مع المستخدم مباشرة.
             """.trimIndent()
-            val response = withAppCheckRetry {
+            withAppCheckRecovery {
                 withTimeout(45_000L) {
-                    generalArabicModel.generateContent(prompt)
+                    modelClient.generateGeneralArabicText(prompt)
                 }
             }
-            response.text?.trim() ?: "أنا معك، أخبرني بما تريد تنفيذه على هاتفك."
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Conversational reply failed", e)
+            safeLogE(TAG, "Conversational reply failed", e)
             throw e
         }
+    }
+
+    suspend fun pingModelTest(): Pair<Boolean, String> {
+        val startTime = System.currentTimeMillis()
+        val reply = withAppCheckRecovery {
+            withTimeout(20_000L) {
+                modelClient.pingModelTest()
+            }
+        }
+        val elapsed = System.currentTimeMillis() - startTime
+        val detail = if (reply.isNotBlank()) "متصل بنجاح ($reply) خلال ${elapsed}ms" else "متصل بنجاح خلال ${elapsed}ms"
+        return true to detail
     }
 
     private fun parsePlanJson(originalCommand: String, json: JSONObject): AgentPlan {

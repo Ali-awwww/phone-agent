@@ -26,6 +26,7 @@ import androidx.compose.material.icons.rounded.Alarm
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.Refresh
@@ -230,6 +231,7 @@ private fun PermissionItemCard(
 ) {
     val icon = when (item.type) {
         AgentPermissionType.ACCESSIBILITY -> Icons.Rounded.AccessibilityNew
+        AgentPermissionType.OVERLAY -> Icons.Rounded.Layers
         AgentPermissionType.QUERY_ALL_PACKAGES -> Icons.Rounded.Apps
         AgentPermissionType.USAGE_ACCESS -> Icons.Rounded.BarChart
         AgentPermissionType.MICROPHONE -> Icons.Rounded.Mic

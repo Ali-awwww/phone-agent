@@ -31,6 +31,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -45,7 +46,12 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.R
+import com.example.data.local.ChatHistoryRepository
+import com.example.data.local.PhoneAgentDatabase
 import com.example.di.AppContainer
+import com.example.game.GeneralGameEngine
+import com.example.overlay.AgentExecutionController
+import com.example.overlay.AgentFloatingControlManager
 import com.example.ui.components.AgentSafetyWarningBanner
 import com.example.ui.components.CyberGeometricBackground
 import com.example.ui.screens.ActionLogScreen
@@ -112,6 +118,27 @@ fun PhoneAgentApp(
         AgentDestination.Permissions
     )
 
+    val chatHistoryRepository = remember(applicationContext) {
+        val db = PhoneAgentDatabase.getInstance(applicationContext)
+        ChatHistoryRepository(db.chatMessageDao(), db.agentTaskDao())
+    }
+    val executionController = remember {
+        AgentExecutionController()
+    }
+    val floatingControlManager = remember(applicationContext) {
+        AgentFloatingControlManager(applicationContext)
+    }
+    val generalGameEngine = remember(applicationContext, appContainer, executionController, floatingControlManager) {
+        GeneralGameEngine(
+            context = applicationContext,
+            geminiRepository = appContainer.geminiRepository,
+            actionLogRepository = appContainer.actionLogRepository,
+            agentPolicy = appContainer.agentPolicy,
+            executionController = executionController,
+            floatingControlManager = floatingControlManager
+        )
+    }
+
     val commandsViewModel: CommandsViewModel = viewModel(
         factory = CommandsViewModel.Factory(
             geminiRepository = appContainer.geminiRepository,
@@ -120,6 +147,11 @@ fun PhoneAgentApp(
             appOrganizer = appContainer.appOrganizer,
             screenVerifier = appContainer.screenVerifier,
             voiceManager = appContainer.voiceAssistantManager,
+            chatHistoryRepository = chatHistoryRepository,
+            generalGameEngine = generalGameEngine,
+            executionController = executionController,
+            floatingControlManager = floatingControlManager,
+            appContext = applicationContext,
             agentPolicy = appContainer.agentPolicy
         )
     )
@@ -244,7 +276,14 @@ fun PhoneAgentApp(
                                 )
                             }
                             composable(AgentDestination.Apps.route) {
-                                AppsScreen(viewModel = appsViewModel)
+                                AppsScreen(
+                                    viewModel = appsViewModel,
+                                    onStartGameplayFromApps = {
+                                        navigateTo(AgentDestination.Commands.route)
+                                        commandsViewModel.startGameplayGoal()
+                                    },
+                                    onOpenPermissionsTab = { navigateTo(AgentDestination.Permissions.route) }
+                                )
                             }
                             composable(AgentDestination.Logs.route) {
                                 ActionLogScreen(viewModel = actionLogViewModel)
