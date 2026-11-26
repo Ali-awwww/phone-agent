@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.AccessibilityNew
 import androidx.compose.material.icons.rounded.Alarm
 import androidx.compose.material.icons.rounded.Apps
@@ -145,6 +146,74 @@ fun PermissionsScreen(
                             contentDescription = "تحديث حالة الأذونات",
                             tint = CyberElectricCyan
                         )
+                    }
+                }
+            }
+
+            item {
+                CyberPanelCard(
+                    containerColor = CyberSurfaceElevated,
+                    borderColor = CyberElectricCyan
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Apps,
+                                contentDescription = null,
+                                tint = CyberElectricCyan,
+                                modifier = Modifier.size(28.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = stringResource(R.string.our_apps_title),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = CyberTextPrimary
+                                )
+                                Text(
+                                    text = stringResource(R.string.our_apps_subtitle),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = CyberTextSecondary
+                                )
+                            }
+                        }
+
+                        Button(
+                            onClick = {
+                                PermissionHelper.openExternalBrowser(
+                                    context,
+                                    PermissionHelper.OUR_APPS_SHOWCASE_URL
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("our_apps_button"),
+                            shape = MaterialTheme.shapes.small,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = CyberElectricCyan,
+                                contentColor = CyberOnCyan
+                            )
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = stringResource(R.string.our_apps_button),
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }

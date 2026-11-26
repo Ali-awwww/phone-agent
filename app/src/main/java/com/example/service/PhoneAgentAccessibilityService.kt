@@ -71,7 +71,7 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
     }
 
     fun captureDetailedScreenForGame(): GameScreenObservation? {
-        val root = rootInActiveWindow ?: return null
+        val root = rootInActiveWindow ?: windows?.firstOrNull { it.isActive }?.root ?: return null
         val packageName = root.packageName?.toString().orEmpty()
         val visibleTexts = linkedSetOf<String>()
         val clickableLabels = linkedSetOf<String>()
@@ -154,22 +154,32 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
         )
     }
 
+    private fun normalizeArabicForMatch(input: String): String {
+        return input
+            .replace(Regex("[\\u064B-\\u065F\\u0670]"), "")
+            .replace('أ', 'ا')
+            .replace('إ', 'ا')
+            .replace('آ', 'ا')
+            .replace('ى', 'ي')
+            .trim()
+            .lowercase()
+    }
+
     fun findAndClickByText(query: String): Boolean {
-        val root = rootInActiveWindow ?: return false
+        val root = rootInActiveWindow ?: windows?.firstOrNull { it.isActive }?.root ?: return false
         val snapshot = captureCurrentScreen()
         if (snapshot?.hasSensitiveSecurityField == true) {
             return false
         }
 
-        val normalizedQuery = query.trim().lowercase()
+        val normalizedQuery = normalizeArabicForMatch(query)
         if (normalizedQuery.isEmpty()) return false
 
-        val matches = mutableListOf<AccessibilityNodeInfo>()
-        collectNodes(root, 0) { node ->
-            val t = node.text?.toString()?.trim()?.lowercase().orEmpty()
-            val d = node.contentDescription?.toString()?.trim()?.lowercase().orEmpty()
+        val matches = collectNodes(root, 0) { node ->
+            val t = normalizeArabicForMatch(node.text?.toString().orEmpty())
+            val d = normalizeArabicForMatch(node.contentDescription?.toString().orEmpty())
             t.contains(normalizedQuery) || d.contains(normalizedQuery)
-        }.let { matches.addAll(it) }
+        }
 
         for (match in matches) {
             var target: AccessibilityNodeInfo? = match
@@ -177,7 +187,45 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
                 target = target.parent
             }
             if (target != null && target.isClickable && target.isEnabled) {
-                return target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                if (target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    suspend fun findAndClickHumanLike(query: String): Boolean {
+        if (findAndClickByText(query)) return true
+
+        val root = rootInActiveWindow ?: windows?.firstOrNull { it.isActive }?.root ?: return false
+        val snapshot = captureCurrentScreen()
+        if (snapshot?.hasSensitiveSecurityField == true) {
+            return false
+        }
+
+        val normalizedQuery = normalizeArabicForMatch(query)
+        if (normalizedQuery.isEmpty()) return false
+
+        val matches = collectNodes(root, 0) { node ->
+            val t = normalizeArabicForMatch(node.text?.toString().orEmpty())
+            val d = normalizeArabicForMatch(node.contentDescription?.toString().orEmpty())
+            t.contains(normalizedQuery) || d.contains(normalizedQuery)
+        }
+
+        val dm = resources.displayMetrics
+        val screenW = dm.widthPixels.coerceAtLeast(1).toFloat()
+        val screenH = dm.heightPixels.coerceAtLeast(1).toFloat()
+        val rect = Rect()
+
+        for (match in matches) {
+            match.getBoundsInScreen(rect)
+            if (rect.width() > 0 && rect.height() > 0) {
+                val cx = (rect.exactCenterX() / screenW).coerceIn(0.02f, 0.98f)
+                val cy = (rect.exactCenterY() / screenH).coerceIn(0.02f, 0.98f)
+                if (performTapAt(cx, cy)) {
+                    return true
+                }
             }
         }
         return false

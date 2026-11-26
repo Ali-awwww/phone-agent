@@ -51,6 +51,12 @@
     <string name="permission_enable_button">تفعيل الآن</string>
     <string name="permission_settings_button">فتح الإعدادات</string>
 
+    <!-- معرض التطبيقات -->
+    <string name="our_apps_title">معرض تطبيقاتنا</string>
+    <string name="our_apps_subtitle">استعرض جميع تطبيقاتنا وافتحها مباشرة عبر المتصفح الخارجي</string>
+    <string name="our_apps_button">تطبيقاتنا</string>
+    <string name="our_apps_browser_error">تعذر العثور على متصفح خارجي لفتح الرابط.</string>
+
     <!-- قناة الإشعارات -->
     <string name="notification_channel_reminders_name">تذكيرات وكيل الهاتف</string>
     <string name="notification_channel_reminders_desc">إشعارات التذكيرات والمواعيد التي يضبطها وكيل الهاتف</string>

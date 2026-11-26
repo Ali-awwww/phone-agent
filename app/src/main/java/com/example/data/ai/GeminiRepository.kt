@@ -1,5 +1,6 @@
 package com.example.data.ai
 
+import com.example.executor.ModelRouteTier
 import com.example.model.AgentPlan
 import com.example.model.AgentPlanStep
 import com.example.model.AppFolder
@@ -13,7 +14,10 @@ import com.example.security.ERROR_APP_CHECK_EXHAUSTED_AR
 import com.example.security.FirebaseAppCheckClient
 import com.example.security.MAX_APP_CHECK_ATTEMPTS
 import com.example.security.isAppCheckTokenError
+import com.example.security.isModelOverloadError
+import com.example.security.isModelUnavailableError
 import com.example.security.safeLogE
+import com.example.security.safeLogI
 import com.example.security.safeLogW
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
@@ -21,11 +25,31 @@ import com.google.firebase.ai.type.Schema
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 
 private const val TAG = "GeminiRepository"
+
+// ملاحظة توثيقية: نماذج Gemini 2.5 (مثل gemini-2.5-flash و gemini-2.5-flash-lite) متوقفة/مهملة في Firebase AI Logic،
+// لذلك نستخدم البديلين المتاحين والمدعومين رسمياً من الجيل الثالث:
+// - Flash لأوامر الهاتف والتنفيذ واللعب وقراءة الشاشة: gemini-3.8-flash
+// - Lite للأسئلة العامة والنقاشات والاستشارات والتصنيف الخفيف: gemini-3.5-flash-lite
+const val PRIMARY_GEMINI_MODEL = "gemini-3.8-flash"
+const val FALLBACK_LITE_GEMINI_MODEL = "gemini-3.5-flash-lite"
+const val MSG_MODEL_BUSY_RETRYING_AR = "النموذج مشغول الآن، أعيد المحاولة…"
+val DEFAULT_OVERLOAD_BACKOFF_MS: List<Long> = listOf(1_000L, 2_000L, 4_000L)
+
+data class ModelResponseMetadata<T>(
+    val value: T,
+    val tier: ModelRouteTier,
+    val intendedModel: String,
+    val modelUsed: String,
+    val usedFallback: Boolean
+)
 
 internal interface GeminiModelClient {
     suspend fun generatePlanJson(prompt: String): String
@@ -34,6 +58,16 @@ internal interface GeminiModelClient {
     suspend fun generateCategorizationJson(prompt: String): String
     suspend fun generateGeneralArabicText(prompt: String): String
     suspend fun pingModelTest(): String = generateGeneralArabicText("اختبار اتصال سريع: رد بكلمة واحدة «متصل».")
+
+    suspend fun generatePlanJsonFallback(prompt: String): String = generatePlanJson(prompt)
+    suspend fun generateAudioPlanJsonFallback(audioBytes: ByteArray, mimeType: String, prompt: String): String =
+        generateAudioPlanJson(audioBytes, mimeType, prompt)
+    suspend fun generateVerificationJsonFallback(prompt: String): String = generateVerificationJson(prompt)
+    suspend fun generateCategorizationJsonFallback(prompt: String): String = generateCategorizationJson(prompt)
+    suspend fun generateGeneralArabicTextFallback(prompt: String): String = generateGeneralArabicText(prompt)
+    suspend fun generateLiteGeneralArabicText(prompt: String): String = generateGeneralArabicTextFallback(prompt)
+    suspend fun pingModelTestFallback(): String =
+        generateGeneralArabicTextFallback("اختبار اتصال سريع: رد بكلمة واحدة «متصل».")
 }
 
 private class FirebaseGeminiModelClient : GeminiModelClient {
@@ -103,70 +137,84 @@ private class FirebaseGeminiModelClient : GeminiModelClient {
         )
     )
 
-    private val strictAgentSystemInstruction: String = """
-        أنت «وكيل الهاتف»، مساعد أندرويد عربي مهذّب ومختصر جداً يتحدث العربية الفصحى البسيطة.
-        أسلوبك الدائم: تشرح للمستخدم باختصار ما ستفعله قبل أن تفعله، ثم تخبره بالنتيجة الحقيقية بعدها دون إطالة.
+    private val phoneExecutionSystemInstruction: String = """
+        أنت «وكيل الهاتف»، مساعد ذكي يتحدث العربية الفصحى البسيطة، يجمع بين الإجابة المفيدة عن الأسئلة العامة والنقاشات وتنفيذ مهام الهاتف بدقة وأمان.
+        أسلوبك الدائم:
+        - للأسئلة العامة أو النقاش أو الاستشارة: أجب مباشرة بوضوح ولطف وفائدة دون قيود نطاق غير مبررة.
+        - لمهام الهاتف: اشرح للمستخدم باختصار ما ستفعله قبل أن تفعله، نفّذ خطوة بخطوة، ثم أخبره بالنتيجة الحقيقية بعدها دون إطالة.
 
-        نطاقك المسموح فقط (لا تخرج عنه أبداً):
-        1. تنظيم التطبيقات (عرضها، البحث فيها، تصنيفها في مجلدات، نقلها، إخفاء غير المستخدمة).
-        2. تنفيذ الأوامر داخل التطبيقات (فتح تطبيق، البحث داخله، ضبط منبه أو تذكير، تجهيز رسالة بموافقة المستخدم، فتح إعدادات جهاز بسيطة).
-        3. تجربة التطبيقات وتلخيص محتوى شاشاتها الفعلية بالعربية.
-
-        قواعد الرفض الصارمة:
-        - لا تُجب عن أي أسئلة عامة خارج الهاتف ولا تتحدث في مواضيع خارج نطاقك؛ وإذا سُئلت عن شيء خارج النطاق فاعتذر بلطف واختصار واقترح ما تستطيع فعله من المهام الثلاث أعلاه.
-        - ارفض فوراً وبأدب أي طلب يتعلق بالممنوعات الثمانية التالية:
-          (1) كلمات المرور، (2) البصمة، (3) الدفع، (4) الشراء، (5) إرسال الأموال، (6) حذف البيانات، (7) تغيير إعدادات الحسابات، (8) تجاوز قفل الشاشة.
-
-        قواعد عدم الثقة ومنع الهلوسة:
+        قواعد السلامة ومنع الهلوسة للأفعال على الجهاز:
+        - ارفض فقط الأفعال الخطرة الثمانية: كلمات المرور، البصمة، الدفع، الشراء، إرسال الأموال، حذف البيانات، تغيير إعدادات الحسابات، وتجاوز قفل الشاشة. (أما الأسئلة المعرفية العامة فأجب عنها بشكل طبيعي).
         - لا تخترع أبداً أي أسماء تطبيقات غير موجودة في قائمة التطبيقات المثبتة، ولا تخترع أسماء أزرار أو عناصر غير مقروءة من الشاشة الفعلية، ولا تخترع أرقام هواتف.
-        - يجب التحقق من الشاشة الفعلية عبر ScreenVerifier قبل كل خطوة وبعدها؛ وعند غياب العنصر المطلوب على الشاشة قُل بوضوح: «لم أجد هذا العنصر على الشاشة» وتوقف دون اختراع بدائل.
-        - اعتمد واجهات أندرويد الرسمية أولاً ثم خدمة إمكانية الوصول عند الحاجة، واجعل requiresApproval = true لأي إجراء حساس مثل إرسال رسالة أو تعديل إعداد.
+        - تحقق من الشاشة الفعلية عبر ScreenVerifier قبل كل خطوة تنفيذية وبعدها؛ وعند غياب العنصر المطلوب على الشاشة قُل بوضوح: «لم أجد هذا العنصر على الشاشة» وتوقف دون اختراع بدائل.
+        - اعتمد واجهات أندرويد الرسمية أولاً ثم خدمة إمكانية الوصول عند الحاجة، واجعل requiresApproval = true لأي إجراء حساس مثل الإرسال أو الحذف أو تعديل إعداد مهم.
     """.trimIndent()
 
-    private val plannerModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash",
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = planSchema
-            },
-            systemInstruction = content {
-                text(strictAgentSystemInstruction)
-            }
-        )
-    }
+    private val generalAssistantSystemInstruction: String = """
+        أنت «وكيل الهاتف»، مساعد ذكي متكامل يتحدث العربية الفصحى البسيطة ويجيب عن جميع الأسئلة العادية والنقاشات والمعرفة العامة والاستشارات بوضوح ودقة وأدب، كما يساعد في مهام الهاتف.
+        - أجب عن الأسئلة والنقاشات العامة بشكل مباشر ومفيد ومرتب دون تقييد نفسك بأوامر الهاتف فقط.
+        - إذا طلب المستخدم في المحادثة فعلاً على الجهاز، طبّق قواعد الأمان: تحقق من الشاشة الفعلية، لا تخترع أسماء تطبيقات أو أزرار، واطلب موافقته الصريحة قبل أي فعل حساس (حذف، إرسال، تغيير إعدادات، دفع).
+        - عندما لا تكون متأكداً من معلومة أو عنصر على الشاشة، صرّح بذلك بصدق ووضوح بدل التخمين.
+    """.trimIndent()
 
-    private val audioPlannerModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash",
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = audioCommandSchema
-            },
-            systemInstruction = content {
-                text(strictAgentSystemInstruction)
-            }
-        )
-    }
+    private fun createPlannerModel(modelName: String) = Firebase.ai.generativeModel(
+        modelName = modelName,
+        generationConfig = generationConfig {
+            responseMimeType = "application/json"
+            responseSchema = planSchema
+        },
+        systemInstruction = content { text(phoneExecutionSystemInstruction) }
+    )
 
-    private val verifierModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash",
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = verificationSchema
-            },
-            systemInstruction = content {
-                text(
-                    "أنت وحدة تحقق صارمة للشاشة (ScreenVerifier). لا تخترع أي عنصر غير موجود في النصوص والأزرار المقروءة فعلياً. إن غاب العنصر أعد verified=false واذكر بوضوح «لم أجد هذا العنصر على الشاشة»."
-                )
-            }
-        )
-    }
+    private fun createAudioPlannerModel(modelName: String) = Firebase.ai.generativeModel(
+        modelName = modelName,
+        generationConfig = generationConfig {
+            responseMimeType = "application/json"
+            responseSchema = audioCommandSchema
+        },
+        systemInstruction = content { text(phoneExecutionSystemInstruction) }
+    )
+
+    private fun createVerifierModel(modelName: String) = Firebase.ai.generativeModel(
+        modelName = modelName,
+        generationConfig = generationConfig {
+            responseMimeType = "application/json"
+            responseSchema = verificationSchema
+        },
+        systemInstruction = content {
+            text(
+                "أنت وحدة تحقق صارمة للشاشة (ScreenVerifier). لا تخترع أي عنصر غير موجود في النصوص والأزرار المقروءة فعلياً. إن غاب العنصر أعد verified=false واذكر بوضوح «لم أجد هذا العنصر على الشاشة»."
+            )
+        }
+    )
+
+    private fun createGeneralArabicModel(modelName: String, systemText: String) = Firebase.ai.generativeModel(
+        modelName = modelName,
+        systemInstruction = content { text(systemText) }
+    )
+
+    private val plannerModel by lazy { createPlannerModel(PRIMARY_GEMINI_MODEL) }
+    private val fallbackPlannerModel by lazy { createPlannerModel(FALLBACK_LITE_GEMINI_MODEL) }
+
+    private val audioPlannerModel by lazy { createAudioPlannerModel(PRIMARY_GEMINI_MODEL) }
+    private val fallbackAudioPlannerModel by lazy { createAudioPlannerModel(FALLBACK_LITE_GEMINI_MODEL) }
+
+    private val verifierModel by lazy { createVerifierModel(PRIMARY_GEMINI_MODEL) }
+    private val fallbackVerifierModel by lazy { createVerifierModel(FALLBACK_LITE_GEMINI_MODEL) }
 
     private val categorizerModel by lazy {
         Firebase.ai.generativeModel(
-            modelName = "gemini-3.5-flash-lite",
+            modelName = FALLBACK_LITE_GEMINI_MODEL,
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = categorizationSchema
+            }
+        )
+    }
+
+    private val fallbackCategorizerModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = PRIMARY_GEMINI_MODEL,
             generationConfig = generationConfig {
                 responseMimeType = "application/json"
                 responseSchema = categorizationSchema
@@ -175,16 +223,19 @@ private class FirebaseGeminiModelClient : GeminiModelClient {
     }
 
     private val generalArabicModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash",
-            systemInstruction = content {
-                text(strictAgentSystemInstruction)
-            }
-        )
+        createGeneralArabicModel(PRIMARY_GEMINI_MODEL, phoneExecutionSystemInstruction)
+    }
+    private val liteGeneralArabicModel by lazy {
+        createGeneralArabicModel(FALLBACK_LITE_GEMINI_MODEL, generalAssistantSystemInstruction)
     }
 
     override suspend fun generatePlanJson(prompt: String): String {
         val response = plannerModel.generateContent(prompt)
+        return response.text ?: throw IllegalStateException("لم يُرجع النموذج استجابة صالحة.")
+    }
+
+    override suspend fun generatePlanJsonFallback(prompt: String): String {
+        val response = fallbackPlannerModel.generateContent(prompt)
         return response.text ?: throw IllegalStateException("لم يُرجع النموذج استجابة صالحة.")
     }
 
@@ -202,8 +253,27 @@ private class FirebaseGeminiModelClient : GeminiModelClient {
         return response.text ?: throw IllegalStateException("لم يتم استلام رد من النموذج الصوتي.")
     }
 
+    override suspend fun generateAudioPlanJsonFallback(
+        audioBytes: ByteArray,
+        mimeType: String,
+        prompt: String
+    ): String {
+        val response = fallbackAudioPlannerModel.generateContent(
+            content {
+                inlineData(audioBytes, mimeType)
+                text(prompt)
+            }
+        )
+        return response.text ?: throw IllegalStateException("لم يتم استلام رد من النموذج الصوتي.")
+    }
+
     override suspend fun generateVerificationJson(prompt: String): String {
         val response = verifierModel.generateContent(prompt)
+        return response.text ?: "{}"
+    }
+
+    override suspend fun generateVerificationJsonFallback(prompt: String): String {
+        val response = fallbackVerifierModel.generateContent(prompt)
         return response.text ?: "{}"
     }
 
@@ -212,13 +282,31 @@ private class FirebaseGeminiModelClient : GeminiModelClient {
         return response.text ?: "{}"
     }
 
+    override suspend fun generateCategorizationJsonFallback(prompt: String): String {
+        val response = fallbackCategorizerModel.generateContent(prompt)
+        return response.text ?: "{}"
+    }
+
     override suspend fun generateGeneralArabicText(prompt: String): String {
         val response = generalArabicModel.generateContent(prompt)
-        return response.text?.trim() ?: throw IllegalStateException("لم يُرجع النموذج ملخصاً.")
+        return response.text?.trim() ?: throw IllegalStateException("لم يُرجع النموذج استجابة.")
+    }
+
+    override suspend fun generateGeneralArabicTextFallback(prompt: String): String {
+        return generateLiteGeneralArabicText(prompt)
+    }
+
+    override suspend fun generateLiteGeneralArabicText(prompt: String): String {
+        val response = liteGeneralArabicModel.generateContent(prompt)
+        return response.text?.trim() ?: throw IllegalStateException("لم يُرجع النموذج استجابة.")
     }
 
     override suspend fun pingModelTest(): String {
         return generateGeneralArabicText("اختبار اتصال سريع: رد بكلمة واحدة «متصل».")
+    }
+
+    override suspend fun pingModelTestFallback(): String {
+        return generateLiteGeneralArabicText("اختبار اتصال سريع: رد بكلمة واحدة «متصل».")
     }
 }
 
@@ -227,6 +315,7 @@ class GeminiRepository internal constructor(
     private val modelClient: GeminiModelClient,
     private val maxAppCheckAttempts: Int = MAX_APP_CHECK_ATTEMPTS,
     private val retryDelayMs: Long = DEFAULT_APP_CHECK_RETRY_DELAY_MS,
+    private val overloadRetryDelaysMs: List<Long> = DEFAULT_OVERLOAD_BACKOFF_MS,
     private val delayFn: suspend (Long) -> Unit = { delay(it) }
 ) {
     constructor(
@@ -314,11 +403,116 @@ class GeminiRepository internal constructor(
         )
     }
 
+    internal data class ResilientResult<T>(
+        val value: T,
+        val modelUsed: String,
+        val usedFallback: Boolean = false
+    )
+
+    internal suspend fun <T> withModelResilience(
+        timeoutMs: Long,
+        onStatusUpdate: (suspend (String) -> Unit)? = null,
+        primaryModelName: String = PRIMARY_GEMINI_MODEL,
+        fallbackModelName: String = FALLBACK_LITE_GEMINI_MODEL,
+        primaryCall: suspend () -> T,
+        fallbackCall: (suspend () -> T)? = null
+    ): ResilientResult<T> {
+        var lastError: Exception? = null
+        var immediateUnavailable = false
+
+        try {
+            val result = withAppCheckRecovery {
+                withTimeout(timeoutMs) { primaryCall() }
+            }
+            return ResilientResult(result, primaryModelName, usedFallback = false)
+        } catch (e: CancellationException) {
+            if (e !is TimeoutCancellationException) throw e
+            currentCoroutineContext().ensureActive()
+            lastError = e
+        } catch (e: Exception) {
+            if (isModelUnavailableError(e) && fallbackCall != null) {
+                immediateUnavailable = true
+                lastError = e
+            } else if (isModelOverloadError(e)) {
+                lastError = e
+            } else {
+                throw e
+            }
+        }
+
+        // Exponential backoff retries only for temporary overload (503 / high demand / timeout),
+        // skipping straight to safe alternate model when primary model ID is unavailable (404 / unsupported).
+        if (!immediateUnavailable) {
+            for ((index, waitMs) in overloadRetryDelaysMs.withIndex()) {
+                currentCoroutineContext().ensureActive()
+                safeLogW(
+                    TAG,
+                    "Model $primaryModelName busy/overloaded; retry ${index + 1}/${overloadRetryDelaysMs.size} after ${waitMs}ms.",
+                    lastError
+                )
+                onStatusUpdate?.invoke(MSG_MODEL_BUSY_RETRYING_AR)
+                if (waitMs > 0L) {
+                    delayFn(waitMs)
+                }
+                try {
+                    val result = withAppCheckRecovery {
+                        withTimeout(timeoutMs) { primaryCall() }
+                    }
+                    return ResilientResult(result, primaryModelName, usedFallback = false)
+                } catch (e: CancellationException) {
+                    if (e !is TimeoutCancellationException) throw e
+                    currentCoroutineContext().ensureActive()
+                    lastError = e
+                } catch (e: Exception) {
+                    if (isModelUnavailableError(e) && fallbackCall != null) {
+                        lastError = e
+                        break
+                    } else if (isModelOverloadError(e)) {
+                        lastError = e
+                    } else {
+                        throw e
+                    }
+                }
+            }
+        }
+
+        if (fallbackCall != null) {
+            currentCoroutineContext().ensureActive()
+            safeLogW(
+                TAG,
+                "Primary model $primaryModelName unavailable/overloaded; falling back to $fallbackModelName.",
+                lastError
+            )
+            onStatusUpdate?.invoke(MSG_MODEL_BUSY_RETRYING_AR)
+            val fallbackResult = withAppCheckRecovery {
+                withTimeout(timeoutMs) { fallbackCall() }
+            }
+            return ResilientResult(fallbackResult, fallbackModelName, usedFallback = true)
+        }
+
+        throw lastError ?: IllegalStateException("تعذر الوصول للنموذج بسبب الضغط المؤقت.")
+    }
+
     suspend fun generateCommandPlan(
         userCommand: String,
         installedAppNames: List<String>,
-        currentScreenSummary: String
+        currentScreenSummary: String,
+        onStatusUpdate: (suspend (String) -> Unit)? = null
     ): AgentPlan {
+        return generateCommandPlanWithMeta(
+            userCommand = userCommand,
+            installedAppNames = installedAppNames,
+            currentScreenSummary = currentScreenSummary,
+            onStatusUpdate = onStatusUpdate
+        ).value
+    }
+
+    suspend fun generateCommandPlanWithMeta(
+        userCommand: String,
+        installedAppNames: List<String>,
+        currentScreenSummary: String,
+        onStatusUpdate: (suspend (String) -> Unit)? = null
+    ): ModelResponseMetadata<AgentPlan> {
         try {
             val prompt = buildString {
                 appendLine("طلب المستخدم: $userCommand")
@@ -327,13 +521,29 @@ class GeminiRepository internal constructor(
                 appendLine("أنشئ خطة تنفيذ دقيقة خطوة بخطوة بصيغة JSON حسب المخطط المطلوب.")
             }
 
-            val jsonText = withAppCheckRecovery {
-                withTimeout(60_000L) {
-                    modelClient.generatePlanJson(prompt)
-                }
-            }
-            return parsePlanJson(userCommand, JSONObject(jsonText))
+            val result = withModelResilience(
+                timeoutMs = 60_000L,
+                onStatusUpdate = onStatusUpdate,
+                primaryModelName = PRIMARY_GEMINI_MODEL,
+                fallbackModelName = FALLBACK_LITE_GEMINI_MODEL,
+                primaryCall = { modelClient.generatePlanJson(prompt) },
+                fallbackCall = { modelClient.generatePlanJsonFallback(prompt) }
+            )
+            val plan = parsePlanJson(userCommand, JSONObject(result.value))
+            safeLogI(
+                TAG,
+                "ModelRoute tier=FLASH intended=$PRIMARY_GEMINI_MODEL actual=${result.modelUsed} fallback=${result.usedFallback} (commandPlan)"
+            )
+            return ModelResponseMetadata(
+                value = plan,
+                tier = ModelRouteTier.FLASH,
+                intendedModel = PRIMARY_GEMINI_MODEL,
+                modelUsed = result.modelUsed,
+                usedFallback = result.usedFallback
+            )
         } catch (e: CancellationException) {
+            if (e !is TimeoutCancellationException) throw e
+            safeLogE(TAG, "Timed out generating command plan", e)
             throw e
         } catch (e: Exception) {
             safeLogE(TAG, "Failed to generate command plan", e)
@@ -344,23 +554,53 @@ class GeminiRepository internal constructor(
     suspend fun transcribeAndPlanAudio(
         audioBytes: ByteArray,
         mimeType: String,
-        installedAppNames: List<String>
+        installedAppNames: List<String>,
+        onStatusUpdate: (suspend (String) -> Unit)? = null
     ): Pair<String, AgentPlan> {
+        return transcribeAndPlanAudioWithMeta(
+            audioBytes = audioBytes,
+            mimeType = mimeType,
+            installedAppNames = installedAppNames,
+            onStatusUpdate = onStatusUpdate
+        ).value
+    }
+
+    suspend fun transcribeAndPlanAudioWithMeta(
+        audioBytes: ByteArray,
+        mimeType: String,
+        installedAppNames: List<String>,
+        onStatusUpdate: (suspend (String) -> Unit)? = null
+    ): ModelResponseMetadata<Pair<String, AgentPlan>> {
         try {
             val prompt = buildString {
                 appendLine("استمع إلى التسجيل الصوتي للمستخدم باللغة العربية، اكتب النص المفهوم في transcriptAr، ثم أنشئ خطة الخطوات التنفيذية.")
                 appendLine("التطبيقات المتاحة: ${installedAppNames.take(40).joinToString("، ")}")
             }
-            val jsonText = withAppCheckRecovery {
-                withTimeout(60_000L) {
-                    modelClient.generateAudioPlanJson(audioBytes, mimeType, prompt)
-                }
-            }
-            val json = JSONObject(jsonText)
+            val result = withModelResilience(
+                timeoutMs = 60_000L,
+                onStatusUpdate = onStatusUpdate,
+                primaryModelName = PRIMARY_GEMINI_MODEL,
+                fallbackModelName = FALLBACK_LITE_GEMINI_MODEL,
+                primaryCall = { modelClient.generateAudioPlanJson(audioBytes, mimeType, prompt) },
+                fallbackCall = { modelClient.generateAudioPlanJsonFallback(audioBytes, mimeType, prompt) }
+            )
+            val json = JSONObject(result.value)
             val transcript = json.optString("transcriptAr", "").ifBlank { "أمر صوتي" }
             val plan = parsePlanJson(transcript, json)
-            return transcript to plan
+            safeLogI(
+                TAG,
+                "ModelRoute tier=FLASH intended=$PRIMARY_GEMINI_MODEL actual=${result.modelUsed} fallback=${result.usedFallback} (audioPlan)"
+            )
+            return ModelResponseMetadata(
+                value = transcript to plan,
+                tier = ModelRouteTier.FLASH,
+                intendedModel = PRIMARY_GEMINI_MODEL,
+                modelUsed = result.modelUsed,
+                usedFallback = result.usedFallback
+            )
         } catch (e: CancellationException) {
+            if (e !is TimeoutCancellationException) throw e
+            safeLogE(TAG, "Timed out processing audio command", e)
             throw e
         } catch (e: Exception) {
             safeLogE(TAG, "Failed to process audio command", e)
@@ -393,12 +633,18 @@ class GeminiRepository internal constructor(
                 appendLine("محتوى الشاشة المرصود الآن:")
                 appendLine(snapshot.toCompactPromptText())
             }
-            val jsonText = withAppCheckRecovery {
-                withTimeout(45_000L) {
-                    modelClient.generateVerificationJson(prompt)
-                }
-            }
-            val json = JSONObject(jsonText)
+            val result = withModelResilience(
+                timeoutMs = 45_000L,
+                primaryModelName = PRIMARY_GEMINI_MODEL,
+                fallbackModelName = FALLBACK_LITE_GEMINI_MODEL,
+                primaryCall = { modelClient.generateVerificationJson(prompt) },
+                fallbackCall = { modelClient.generateVerificationJsonFallback(prompt) }
+            )
+            safeLogI(
+                TAG,
+                "ModelRoute tier=FLASH intended=$PRIMARY_GEMINI_MODEL actual=${result.modelUsed} fallback=${result.usedFallback} (verifyScreen)"
+            )
+            val json = JSONObject(result.value)
             ScreenVerificationResult(
                 verified = json.optBoolean("verified", true),
                 explanationAr = json.optString("explanationAr", "تم فحص الشاشة بنجاح."),
@@ -406,12 +652,17 @@ class GeminiRepository internal constructor(
                 sensitiveUiDetected = json.optBoolean("sensitiveUiDetected", false)
             )
         } catch (e: CancellationException) {
-            throw e
+            if (e !is TimeoutCancellationException) throw e
+            ScreenVerificationResult(
+                verified = false,
+                explanationAr = "انتهت مهلة التحقق التلقائي من الشاشة.",
+                suggestedFixAr = "تأكد من حالة الشاشة ثم اختر متابعة أو إلغاء."
+            )
         } catch (e: Exception) {
             safeLogE(TAG, "Screen verification failed", e)
             ScreenVerificationResult(
                 verified = false,
-                explanationAr = "تعذر التحقق التلقائي من الشاشة: ${e.message ?: e.localizedMessage ?: "خطأ في الاتصال"}",
+                explanationAr = "تعذر التحقق التلقائي من الشاشة مؤقتاً.",
                 suggestedFixAr = "تأكد من حالة الشاشة ثم اختر متابعة أو إلغاء."
             )
         }
@@ -420,8 +671,23 @@ class GeminiRepository internal constructor(
     suspend fun summarizeAppScreens(
         appName: String,
         packageName: String,
-        capturedScreenTexts: List<String>
+        capturedScreenTexts: List<String>,
+        onStatusUpdate: (suspend (String) -> Unit)? = null
     ): String {
+        return summarizeAppScreensWithMeta(
+            appName = appName,
+            packageName = packageName,
+            capturedScreenTexts = capturedScreenTexts,
+            onStatusUpdate = onStatusUpdate
+        ).value
+    }
+
+    suspend fun summarizeAppScreensWithMeta(
+        appName: String,
+        packageName: String,
+        capturedScreenTexts: List<String>,
+        onStatusUpdate: (suspend (String) -> Unit)? = null
+    ): ModelResponseMetadata<String> {
         try {
             val joined = capturedScreenTexts.joinToString("\n---\n")
             val prompt = """
@@ -436,12 +702,27 @@ class GeminiRepository internal constructor(
                 $joined
             """.trimIndent()
 
-            return withAppCheckRecovery {
-                withTimeout(60_000L) {
-                    modelClient.generateGeneralArabicText(prompt)
-                }
-            }
+            val result = withModelResilience(
+                timeoutMs = 60_000L,
+                onStatusUpdate = onStatusUpdate,
+                primaryModelName = PRIMARY_GEMINI_MODEL,
+                fallbackModelName = FALLBACK_LITE_GEMINI_MODEL,
+                primaryCall = { modelClient.generateGeneralArabicText(prompt) },
+                fallbackCall = { modelClient.generateLiteGeneralArabicText(prompt) }
+            )
+            safeLogI(
+                TAG,
+                "ModelRoute tier=FLASH intended=$PRIMARY_GEMINI_MODEL actual=${result.modelUsed} fallback=${result.usedFallback} (screenRead)"
+            )
+            return ModelResponseMetadata(
+                value = result.value,
+                tier = ModelRouteTier.FLASH,
+                intendedModel = PRIMARY_GEMINI_MODEL,
+                modelUsed = result.modelUsed,
+                usedFallback = result.usedFallback
+            )
         } catch (e: CancellationException) {
+            if (e !is TimeoutCancellationException) throw e
             throw e
         } catch (e: Exception) {
             safeLogE(TAG, "Failed to summarize app", e)
@@ -449,7 +730,10 @@ class GeminiRepository internal constructor(
         }
     }
 
-    suspend fun categorizeApps(apps: List<Pair<String, String>>): Map<String, String> {
+    suspend fun categorizeApps(
+        apps: List<Pair<String, String>>,
+        onStatusUpdate: (suspend (String) -> Unit)? = null
+    ): Map<String, String> {
         if (apps.isEmpty()) return emptyMap()
         try {
             val formatted = apps.take(80).joinToString("\n") { (pkg, label) ->
@@ -462,24 +746,32 @@ class GeminiRepository internal constructor(
                 $formatted
             """.trimIndent()
 
-            val jsonText = withAppCheckRecovery {
-                withTimeout(60_000L) {
-                    modelClient.generateCategorizationJson(prompt)
-                }
-            }
-            val json = JSONObject(jsonText)
+            val result = withModelResilience(
+                timeoutMs = 60_000L,
+                onStatusUpdate = onStatusUpdate,
+                primaryModelName = FALLBACK_LITE_GEMINI_MODEL,
+                fallbackModelName = PRIMARY_GEMINI_MODEL,
+                primaryCall = { modelClient.generateCategorizationJson(prompt) },
+                fallbackCall = { modelClient.generateCategorizationJsonFallback(prompt) }
+            )
+            safeLogI(
+                TAG,
+                "ModelRoute tier=LITE intended=$FALLBACK_LITE_GEMINI_MODEL actual=${result.modelUsed} fallback=${result.usedFallback} (categorizeApps)"
+            )
+            val json = JSONObject(result.value)
             val array = json.optJSONArray("assignments") ?: return emptyMap()
-            val result = mutableMapOf<String, String>()
+            val resultMap = mutableMapOf<String, String>()
             for (i in 0 until array.length()) {
                 val item = array.optJSONObject(i) ?: continue
                 val pkg = item.optString("packageName")
                 val folder = item.optString("folderKey")
                 if (pkg.isNotBlank() && folder.isNotBlank()) {
-                    result[pkg] = AppFolder.fromKey(folder).name
+                    resultMap[pkg] = AppFolder.fromKey(folder).name
                 }
             }
-            return result
+            return resultMap
         } catch (e: CancellationException) {
+            if (e !is TimeoutCancellationException) throw e
             throw e
         } catch (e: Exception) {
             safeLogE(TAG, "App categorization failed", e)
@@ -487,19 +779,63 @@ class GeminiRepository internal constructor(
         }
     }
 
-    suspend fun conversationalReply(userMessage: String, contextSummary: String): String {
+    suspend fun conversationalReply(
+        userMessage: String,
+        contextSummary: String,
+        onStatusUpdate: (suspend (String) -> Unit)? = null,
+        modelTier: ModelRouteTier = ModelRouteTier.LITE
+    ): String {
+        return conversationalReplyWithMeta(
+            userMessage = userMessage,
+            contextSummary = contextSummary,
+            onStatusUpdate = onStatusUpdate,
+            modelTier = modelTier
+        ).value
+    }
+
+    suspend fun conversationalReplyWithMeta(
+        userMessage: String,
+        contextSummary: String,
+        onStatusUpdate: (suspend (String) -> Unit)? = null,
+        modelTier: ModelRouteTier = ModelRouteTier.LITE
+    ): ModelResponseMetadata<String> {
         return try {
             val prompt = """
-                رسالة المستخدم الصوتية: $userMessage
+                رسالة المستخدم: $userMessage
                 سياق الحالة الحالية: $contextSummary
-                أجب برد عربي طبيعي ومختصر ومفيد كأنك تتحدث مع المستخدم مباشرة.
+                أجب برد عربي طبيعي وواضح ومفيد كمساعد ذكي متكامل.
             """.trimIndent()
-            withAppCheckRecovery {
-                withTimeout(45_000L) {
-                    modelClient.generateGeneralArabicText(prompt)
+            val useLitePrimary = modelTier == ModelRouteTier.LITE
+            val intended = if (useLitePrimary) FALLBACK_LITE_GEMINI_MODEL else PRIMARY_GEMINI_MODEL
+            val alternate = if (useLitePrimary) PRIMARY_GEMINI_MODEL else FALLBACK_LITE_GEMINI_MODEL
+
+            val result = withModelResilience(
+                timeoutMs = 45_000L,
+                onStatusUpdate = onStatusUpdate,
+                primaryModelName = intended,
+                fallbackModelName = alternate,
+                primaryCall = {
+                    if (useLitePrimary) modelClient.generateLiteGeneralArabicText(prompt)
+                    else modelClient.generateGeneralArabicText(prompt)
+                },
+                fallbackCall = {
+                    if (useLitePrimary) modelClient.generateGeneralArabicText(prompt)
+                    else modelClient.generateLiteGeneralArabicText(prompt)
                 }
-            }
+            )
+            safeLogI(
+                TAG,
+                "ModelRoute tier=${modelTier.name} intended=$intended actual=${result.modelUsed} fallback=${result.usedFallback} (conversational)"
+            )
+            ModelResponseMetadata(
+                value = result.value,
+                tier = modelTier,
+                intendedModel = intended,
+                modelUsed = result.modelUsed,
+                usedFallback = result.usedFallback
+            )
         } catch (e: CancellationException) {
+            if (e !is TimeoutCancellationException) throw e
             throw e
         } catch (e: Exception) {
             safeLogE(TAG, "Conversational reply failed", e)
@@ -507,15 +843,30 @@ class GeminiRepository internal constructor(
         }
     }
 
-    suspend fun pingModelTest(): Pair<Boolean, String> {
+    suspend fun pingModelTest(
+        onStatusUpdate: (suspend (String) -> Unit)? = null
+    ): Pair<Boolean, String> {
         val startTime = System.currentTimeMillis()
-        val reply = withAppCheckRecovery {
-            withTimeout(20_000L) {
-                modelClient.pingModelTest()
-            }
-        }
+        val result = withModelResilience(
+            timeoutMs = 20_000L,
+            onStatusUpdate = onStatusUpdate,
+            primaryModelName = PRIMARY_GEMINI_MODEL,
+            fallbackModelName = FALLBACK_LITE_GEMINI_MODEL,
+            primaryCall = { modelClient.pingModelTest() },
+            fallbackCall = { modelClient.pingModelTestFallback() }
+        )
         val elapsed = System.currentTimeMillis() - startTime
-        val detail = if (reply.isNotBlank()) "متصل بنجاح ($reply) خلال ${elapsed}ms" else "متصل بنجاح خلال ${elapsed}ms"
+        val reply = result.value
+        val modelTag = if (result.modelUsed == FALLBACK_LITE_GEMINI_MODEL) {
+            " • نموذج احتياطي: ${result.modelUsed}"
+        } else {
+            ""
+        }
+        val detail = if (reply.isNotBlank()) {
+            "متصل بنجاح ($reply) خلال ${elapsed}ms$modelTag"
+        } else {
+            "متصل بنجاح خلال ${elapsed}ms$modelTag"
+        }
         return true to detail
     }
 

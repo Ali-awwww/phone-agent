@@ -27,6 +27,10 @@ sealed interface ChatRouteIntent {
 
     data class StartGameplay(val goalText: String) : ChatRouteIntent
 
+    data object ShowActionHistory : ChatRouteIntent
+
+    data object PromptReminderDetails : ChatRouteIntent
+
     data class ConversationalChat(val message: String) : ChatRouteIntent
 
     data class ExecuteCommandPlan(val command: String) : ChatRouteIntent
@@ -52,6 +56,11 @@ data class GameActionDecision(
     val reasonAr: String = ""
 )
 
+enum class ModelRouteTier(val labelAr: String) {
+    LITE("سؤال عام / نقاش (Lite)"),
+    FLASH("استخدام الهاتف / تنفيذ (Flash)")
+}
+
 object ChatIntentRouter {
 
     fun normalizeDigitsAndArabic(input: String): String {
@@ -74,13 +83,21 @@ object ChatIntentRouter {
             .trim()
     }
 
-    fun classifyIntent(rawInput: String): ChatRouteIntent {
+    fun classifyIntent(
+        rawInput: String,
+        knownAppNames: List<String> = emptyList()
+    ): ChatRouteIntent {
         val raw = rawInput.trim()
         val norm = normalizeDigitsAndArabic(raw).lowercase()
 
         // 1. قراءة الشاشة الحالية
         if (isScreenReadRequest(norm)) {
             return ChatRouteIntent.ReadScreen
+        }
+
+        // 1.5 عرض سجل ما فعله الوكيل («ماذا فعلت؟»)
+        if (isActionHistoryRequest(norm)) {
+            return ChatRouteIntent.ShowActionHistory
         }
 
         // 2. وضع اللعب العام المجاني
@@ -96,15 +113,57 @@ object ChatIntentRouter {
             return ChatRouteIntent.ListTasksAndReminders
         }
         detectCancelTaskRequest(norm)?.let { return it }
-        detectCreateTaskOrReminder(raw, norm)?.let { return it }
+        detectTaskIntentOrPrompt(raw, norm)?.let { return it }
 
-        // 5. تحيات أو دردشة تفاعلية بالعربية
-        if (isConversationalOrGreeting(norm)) {
-            return ChatRouteIntent.ConversationalChat(raw)
+        // 5. أوامر الهاتف التنفيذية داخل التطبيقات والإعدادات (Flash)
+        if (isPhoneUsageCommand(norm, knownAppNames)) {
+            return ChatRouteIntent.ExecuteCommandPlan(raw)
         }
 
-        // 6. أوامر تنفيذية داخل التطبيقات (تمر عبر AgentPolicy + Gemini + ScreenVerifier)
-        return ChatRouteIntent.ExecuteCommandPlan(raw)
+        // 6. النقاشات والأسئلة العامة والاستشارات والتحيات (Lite)
+        return ChatRouteIntent.ConversationalChat(raw)
+    }
+
+    /**
+     * تصنيف خفيف للنية لاختيار النموذج المناسب عبر Firebase AI Logic:
+     * - نقاش / سؤال عام / استشارة / معرفة عامة → ModelRouteTier.LITE
+     * - استخدام الهاتف (فتح تطبيق، تنفيذ أمر، اللعب، قراءة الشاشة، تنفيذ مهمة) → ModelRouteTier.FLASH
+     */
+    fun classifyModelTier(
+        rawInput: String,
+        knownAppNames: List<String> = emptyList()
+    ): ModelRouteTier {
+        return when (classifyIntent(rawInput, knownAppNames)) {
+            is ChatRouteIntent.ConversationalChat -> ModelRouteTier.LITE
+            is ChatRouteIntent.ReadScreen,
+            is ChatRouteIntent.StartGameplay,
+            is ChatRouteIntent.ExecuteCommandPlan,
+            is ChatRouteIntent.CreateTaskOrReminder,
+            is ChatRouteIntent.ListTasksAndReminders,
+            is ChatRouteIntent.CancelTaskOrReminder,
+            is ChatRouteIntent.ShowApps,
+            is ChatRouteIntent.ShowActionHistory,
+            is ChatRouteIntent.PromptReminderDetails -> ModelRouteTier.FLASH
+        }
+    }
+
+    private fun isActionHistoryRequest(norm: String): Boolean {
+        val cleaned = norm.replace("؟", "").replace("?", "").trim()
+        val phrases = listOf(
+            "ماذا فعلت",
+            "ما الذي فعلته",
+            "ايش سويت",
+            "وش سويت",
+            "ماذا نفذت",
+            "اعرض السجل",
+            "عرض السجل",
+            "سجل الافعال",
+            "سجل افعالي",
+            "اخر الافعال",
+            "what did you do",
+            "action log"
+        )
+        return phrases.any { cleaned.contains(it) }
     }
 
     private fun isScreenReadRequest(norm: String): Boolean {
@@ -213,7 +272,7 @@ object ChatIntentRouter {
         return null
     }
 
-    private fun detectCreateTaskOrReminder(raw: String, norm: String): ChatRouteIntent.CreateTaskOrReminder? {
+    private fun detectTaskIntentOrPrompt(raw: String, norm: String): ChatRouteIntent? {
         val isReminder = Regex("(?:ذكرني|نبهني|تذكير|اضبط تذكير|انشئ تذكير|remind me)").containsMatchIn(norm)
         val isAlarm = Regex("(?:منبه|اضبط منبه|ضبط منبه|set alarm)").containsMatchIn(norm)
         val isTask = Regex("(?:اضف مهمة|انشئ مهمة|مهمة جديدة|سجل مهمة|مهمة:|add task)").containsMatchIn(norm)
@@ -264,7 +323,12 @@ object ChatIntentRouter {
             }
         }
 
-        val cleanTitle = extractTaskTitle(raw)
+        val extracted = extractTaskTitleRaw(raw)
+        if (extracted.isBlank() && delayMinutes == null && parsedHour == null) {
+            return ChatRouteIntent.PromptReminderDetails
+        }
+
+        val cleanTitle = extracted.ifBlank { raw.trim() }
         return ChatRouteIntent.CreateTaskOrReminder(
             title = cleanTitle,
             taskType = taskType,
@@ -274,8 +338,8 @@ object ChatIntentRouter {
         )
     }
 
-    private fun extractTaskTitle(raw: String): String {
-        val stripped = raw
+    private fun extractTaskTitleRaw(raw: String): String {
+        return raw
             .replace(Regex("^(?:من فضلك\\s+)?(?:ذكّرني|ذكرني|نبّهني|نبهني|أضف مهمة|اضف مهمة|أنشئ مهمة|انشئ مهمة|مهمة جديدة|مهمة:|اضبط تذكيراً|اضبط تذكير|اضبط منبهاً|اضبط منبه|ضبط منبه)\\s*"), "")
             .replace(Regex("(?:بعد\\s+[\\d٠-٩]+\\s*(?:دقيقة|دقائق|ساعة|ساعات)|بعد\\s+(?:نصف ساعة|ربع ساعة|ساعة|ساعتين|دقيقة))"), "")
             .replace(Regex("(?:على\\s+|في\\s+)?(?:الساعة\\s*)?[\\d٠-٩]{1,2}(?::[\\d٠-٩]{2})?\\s*(?:صباحاً|صباحا|مساءً|مساء|فجراً|فجرا|عصراً|عصرا|ليلاً|ليلا)?"), "")
@@ -283,19 +347,41 @@ object ChatIntentRouter {
             .replace(Regex("^ب(?:ـ)?\\s*(?=\\S)"), "")
             .replace(Regex("\\s+"), " ")
             .trim()
-        return stripped.ifBlank { raw.trim() }
     }
 
-    private fun isConversationalOrGreeting(norm: String): Boolean {
-        val conversationalPhrases = listOf(
-            "مرحبا", "اهلا", "السلام عليكم", "صباح الخير", "مساء الخير",
-            "شكرا", "مساعدة", "ساعدني", "كيف تعمل", "من انت", "عرفني",
-            "كيف حالك", "من هو", "من هي", "ما هو", "ما هي", "تكلم معي",
-            "حدثني", "هل انت", "الو", "سلام", "يا وكيل"
+    private fun isPhoneUsageCommand(
+        norm: String,
+        knownAppNames: List<String>
+    ): Boolean {
+        val phoneActionVerbs = listOf(
+            Regex("(?:^|\\s)(?:افتح|شغل|ابحث|اضغط|انقر|مرر|اسحب|تصفح|اضبط|فعل|عطل|اوقف|ثبت|انقل|اخف|اخفاء|صنف|تصنيف|ارفع|اخفض|خفض|زد|نقص|كتم|اكتم|اقفل|اغلق|سكر|اتصل\\s+ب|ارسل\\s+(?:رسالة|واتساب)|جرب\\s+(?:تطبيق|التطبيق|برنامج)|افحص\\s+(?:تطبيق|التطبيق|الشاشة)|لخص\\s+(?:تطبيق|التطبيق|الشاشة)|اقرا\\s+(?:تطبيق|التطبيق|الشاشة|شاشتي))"),
+            Regex("(?:رتب|نظم|تنظيم)\\s+(?:تطبيقات|التطبيقات|تطبيقاتي|العابي|الالعاب|مجلد|المجلدات|الشاشة)"),
+            Regex("(?:اكتب|ادخل)\\s+(?:في|داخل)\\s+(?:حقل|مربع|التطبيق|الشاشة)"),
+            Regex("\\b(?:open|launch|search\\s+(?:in|on|for)|turn\\s+(?:on|off)|enable|disable|toggle|tap|click|swipe|scroll|arrange|organize\\s+apps|send\\s+message|set\\s+alarm)\\b", RegexOption.IGNORE_CASE)
         )
-        val asksAppAction = listOf("افتح", "شغل", "اضبط", "العب", "اعرض", "ذكرني", "نبهني", "اقرا الشاشة", "ماذا في شاشتي")
-            .any { norm.contains(it) }
-        return !asksAppAction && (conversationalPhrases.any { norm.contains(it) } || norm.endsWith("؟") || norm.endsWith("?"))
+        if (phoneActionVerbs.any { it.containsMatchIn(norm) }) {
+            return true
+        }
+
+        val deviceControlKeywords = listOf(
+            Regex("(?:واي\\s*فاي|بلوتوث|السطوع|سطوع\\s*الشاشة|مستوي\\s*الصوت|صوت\\s*(?:الجهاز|الهاتف)|وضع\\s*الطيران|الكشاف|اعدادات\\s*(?:الجهاز|الهاتف|النظام)|\\bwifi\\b|\\bbluetooth\\b|\\bbrightness\\b|\\bvolume\\b|\\bflashlight\\b)")
+        )
+        if (deviceControlKeywords.any { it.containsMatchIn(norm) }) {
+            return true
+        }
+
+        // إذا ذكر المستخدم اسماً لتطبيق مثبت ولم يكن سؤالاً معرفياً عاماً («ما هو ...» / «اشرح ...»)
+        val isInformationalQuestion = Regex("^(?:ما\\s*(?:هو|هي|معني|فائدة|الفرق)|كيف\\s+يعمل|حدثني\\s+عن|اخبرني\\s+عن|اشرح|معلومات\\s+عن|what\\s+is)\\b")
+            .containsMatchIn(norm)
+        if (!isInformationalQuestion) {
+            val mentionsInstalledApp = knownAppNames.any { appLabel ->
+                val clean = normalizeDigitsAndArabic(appLabel).lowercase()
+                clean.length >= 2 && norm.contains(clean)
+            }
+            if (mentionsInstalledApp) return true
+        }
+
+        return false
     }
 
     fun computeDueMillis(

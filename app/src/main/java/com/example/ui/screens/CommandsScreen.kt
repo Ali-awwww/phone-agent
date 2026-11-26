@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,7 +29,6 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
-import android.widget.Toast
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -37,11 +38,13 @@ import androidx.compose.material.icons.automirrored.rounded.VolumeOff
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.AccessibilityNew
 import androidx.compose.material.icons.rounded.Cancel
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.CloudQueue
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Key
@@ -69,20 +72,24 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
-import com.example.BuildConfig
-import com.example.ui.viewmodel.ModelConnectionStatus
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.BuildConfig
+import com.example.data.local.ChatMessageEntity
+import com.example.data.local.ChatMessageType
 import com.example.policy.AgentPromptRules
 import com.example.ui.components.ChatMessageBubble
 import com.example.ui.components.CyberPanelCard
@@ -108,6 +115,8 @@ import com.example.ui.theme.StatusSuccess
 import com.example.ui.theme.StatusSuccessContainer
 import com.example.ui.viewmodel.CommandsUiState
 import com.example.ui.viewmodel.CommandsViewModel
+import com.example.ui.viewmodel.CompactErrorState
+import com.example.ui.viewmodel.ModelConnectionStatus
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -122,6 +131,22 @@ fun CommandsScreen(
     val activeTasks by viewModel.activeTasks.collectAsStateWithLifecycle()
     val installedAppsByPackage by viewModel.installedAppsByPackage.collectAsStateWithLifecycle()
     val isAccessibilityConnected by viewModel.isAccessibilityConnected.collectAsStateWithLifecycle()
+
+    // منع تكدّس فقاعات الأخطاء المتكررة المتطابقة من السجلات القديمة
+    val displayMessages = remember(messages) {
+        buildList<ChatMessageEntity> {
+            messages.forEach { msg ->
+                val prev = lastOrNull()
+                val isDuplicateError = prev != null &&
+                    msg.messageType == ChatMessageType.ERROR.name &&
+                    prev.messageType == ChatMessageType.ERROR.name &&
+                    msg.text.trim() == prev.text.trim()
+                if (!isDuplicateError) {
+                    add(msg)
+                }
+            }
+        }
+    }
 
     val plan = (state.uiState as? CommandsUiState.PlanActive)?.plan
     val isRecording = state.isListening
@@ -145,21 +170,25 @@ fun CommandsScreen(
         Manifest.permission.RECORD_AUDIO
     ) == PackageManager.PERMISSION_GRANTED
 
-    LaunchedEffect(messages.size, plan != null) {
-        val totalItems = messages.size + (if (plan != null) 2 else 1)
+    LaunchedEffect(displayMessages.size, plan != null) {
+        val headerCount = if (displayMessages.isEmpty()) 2 else 1
+        val totalItems = headerCount + displayMessages.size + (if (plan != null) 1 else 0)
         if (totalItems > 0) {
             listState.animateScrollToItem(totalItems - 1)
         }
     }
 
-    val quickSuggestions = listOf(
-        "تولّي اللعب",
-        "اعرض ألعابي",
-        "ماذا في شاشتي؟",
-        "ذكّرني بعد 10 دقائق بشرب الماء",
-        "اعرض مهامي",
-        "اضبط منبهاً للساعة 7:30 صباحاً"
-    )
+    val quickSuggestions = remember {
+        listOf(
+            "اعرض ألعابي",
+            "تولّي اللعب",
+            "ماذا فعلت؟",
+            "ذكّرني",
+            "اضبط منبهاً للساعة 7:30 صباحاً",
+            "اعرض مهامي",
+            "ماذا في شاشتي؟"
+        )
+    }
 
     Box(
         modifier = modifier.fillMaxSize(),
@@ -169,14 +198,15 @@ fun CommandsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .widthIn(max = 680.dp)
-                .padding(horizontal = 12.dp)
+                .padding(horizontal = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // شريط علوي للدردشة مع حالة إمكانية الوصول والصوت وزر «تولّي اللعب»
+            // 1) شريط علوي نظيف يجمع العنوان وحالة الأذونات وأزرار التحكم داخل حاوية واضحة
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 6.dp),
-                shape = MaterialTheme.shapes.small,
+                shape = RoundedCornerShape(14.dp),
                 color = CyberSurfaceNavy,
                 border = BorderStroke(1.dp, CyberBorderGlow)
             ) {
@@ -196,10 +226,15 @@ fun CommandsScreen(
                             text = "دردشة الوكيل",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
-                            color = CyberElectricCyan
+                            color = CyberElectricCyan,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
                         Surface(
-                            modifier = Modifier.clickable(onClick = onOpenPermissionsTab),
+                            modifier = Modifier
+                                .heightIn(min = 36.dp)
+                                .clickable(onClick = onOpenPermissionsTab),
                             shape = MaterialTheme.shapes.small,
                             color = if (isAccessibilityConnected) StatusSuccessContainer else StatusPendingContainer,
                             border = BorderStroke(
@@ -208,7 +243,7 @@ fun CommandsScreen(
                             )
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
@@ -221,81 +256,139 @@ fun CommandsScreen(
                                 Text(
                                     text = if (isAccessibilityConnected) "متصل" else "تفعيل الأذونات",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = if (isAccessibilityConnected) StatusSuccess else StatusPending
+                                    color = if (isAccessibilityConnected) StatusSuccess else StatusPending,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                             }
                         }
                     }
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(
-                            onClick = { viewModel.startGameplayGoal() },
-                            modifier = Modifier
-                                .size(48.dp)
-                                .testTag("header_take_over_play_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.SportsEsports,
-                                contentDescription = "تولّي اللعب",
-                                tint = CyberElectricCyan
-                            )
-                        }
-                        IconButton(
-                            onClick = { viewModel.toggleVoiceConversationMode() },
-                            modifier = Modifier
-                                .size(48.dp)
-                                .testTag("toggle_tts_button")
-                        ) {
-                            Icon(
-                                imageVector = if (state.voiceConversationMode) {
-                                    Icons.AutoMirrored.Rounded.VolumeUp
-                                } else {
-                                    Icons.AutoMirrored.Rounded.VolumeOff
-                                },
-                                contentDescription = if (state.voiceConversationMode) {
-                                    "إيقاف النطق التلقائي"
-                                } else {
-                                    "تفعيل النطق التلقائي"
-                                },
-                                tint = if (state.voiceConversationMode) CyberElectricCyan else CyberTextSecondary
-                            )
-                        }
-                        if (messages.isNotEmpty()) {
+                    Spacer(Modifier.width(6.dp))
+
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = CyberBgDeep,
+                        border = BorderStroke(1.dp, CyberBorderGlow.copy(alpha = 0.7f))
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
                             IconButton(
-                                onClick = { viewModel.clearChatHistory() },
+                                onClick = { viewModel.startGameplayGoal() },
                                 modifier = Modifier
                                     .size(48.dp)
-                                    .testTag("clear_chat_button")
+                                    .testTag("header_take_over_play_button")
                             ) {
                                 Icon(
-                                    imageVector = Icons.Rounded.DeleteSweep,
-                                    contentDescription = "مسح سجل الدردشة",
-                                    tint = CyberTextSecondary
+                                    imageVector = Icons.Rounded.SportsEsports,
+                                    contentDescription = "تولّي اللعب",
+                                    tint = CyberElectricCyan
                                 )
+                            }
+                            IconButton(
+                                onClick = { viewModel.toggleVoiceConversationMode() },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("toggle_tts_button")
+                            ) {
+                                Icon(
+                                    imageVector = if (state.voiceConversationMode) {
+                                        Icons.AutoMirrored.Rounded.VolumeUp
+                                    } else {
+                                        Icons.AutoMirrored.Rounded.VolumeOff
+                                    },
+                                    contentDescription = if (state.voiceConversationMode) {
+                                        "إيقاف النطق التلقائي"
+                                    } else {
+                                        "تفعيل النطق التلقائي"
+                                    },
+                                    tint = if (state.voiceConversationMode) CyberElectricCyan else CyberTextSecondary
+                                )
+                            }
+                            if (messages.isNotEmpty()) {
+                                IconButton(
+                                    onClick = { viewModel.clearChatHistory() },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("clear_chat_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.DeleteSweep,
+                                        contentDescription = "مسح سجل الدردشة",
+                                        tint = CyberTextSecondary
+                                    )
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // بطاقة حالة اتصال النموذج بـ Gemini مع فحص الاتصال وعرض رمز التصحيح
-            ModelConnectionCard(
-                status = state.modelConnectionStatus,
-                appCheckDebugToken = state.appCheckDebugToken,
-                activeProjectId = state.activeProjectId,
-                isExpanded = state.isModelStatusExpanded,
-                onToggleExpand = { viewModel.toggleModelStatusExpanded() },
-                onCheckConnection = { viewModel.checkModelConnection() },
-                modifier = Modifier.padding(top = 6.dp)
-            )
+            // 2) بطاقة الخطأ المدمجة (مرة واحدة فقط + زر إعادة المحاولة + التفاصيل مطوية افتراضياً) أو بطاقة اتصال النموذج
+            val activeError = state.activeError
+            if (activeError != null) {
+                CompactErrorCard(
+                    error = activeError,
+                    isDetailsExpanded = state.isErrorDetailsExpanded,
+                    appCheckDebugToken = state.appCheckDebugToken,
+                    activeProjectId = state.activeProjectId,
+                    isRetrying = state.modelConnectionStatus is ModelConnectionStatus.Checking || state.isBusyWorking,
+                    onRetry = { viewModel.retryActiveError() },
+                    onToggleDetails = { viewModel.toggleErrorDetailsExpanded() },
+                    onDismiss = { viewModel.dismissActiveError() }
+                )
+            } else {
+                ModelConnectionCard(
+                    status = state.modelConnectionStatus,
+                    statusNoticeAr = state.statusNoticeAr,
+                    lastModelTraceAr = state.lastModelTraceAr,
+                    appCheckDebugToken = state.appCheckDebugToken,
+                    activeProjectId = state.activeProjectId,
+                    isExpanded = state.isModelStatusExpanded,
+                    onToggleExpand = { viewModel.toggleModelStatusExpanded() },
+                    onCheckConnection = { viewModel.checkModelConnection() }
+                )
+            }
 
-            // شريط التحكم الفوري بالوكيل داخل شاشة الدردشة (إيقاف فوري / إيقاف مؤقت-استئناف / إلغاء المهمة / أكمل بنفسي)
+            // شريط حالة مختصر أثناء إعادة المحاولة التلقائية عند انشغال النموذج (خارج وضع شريط التحكم)
+            AnimatedVisibility(
+                visible = state.statusNoticeAr.isNotBlank() &&
+                    !showTaskControlStrip &&
+                    state.modelConnectionStatus !is ModelConnectionStatus.Checking
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = CyberSurfaceNavy,
+                    border = BorderStroke(1.dp, CyberElectricCyan.copy(alpha = 0.65f))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = CyberElectricCyan
+                        )
+                        Text(
+                            text = state.statusNoticeAr,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = CyberElectricCyan,
+                            softWrap = true
+                        )
+                    }
+                }
+            }
+
+            // 3) شريط التحكم الفوري بالوكيل داخل حاوية مرتبة عند تشغيل مهمة أو لعبة
             AnimatedVisibility(visible = showTaskControlStrip) {
                 Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 8.dp),
-                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
                     color = if (state.isPaused) StatusPendingContainer else StatusCancelledContainer,
                     border = BorderStroke(
                         1.5.dp,
@@ -309,6 +402,7 @@ fun CommandsScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Row(
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
@@ -326,144 +420,169 @@ fun CommandsScreen(
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 fontWeight = FontWeight.SemiBold,
-                                color = CyberTextPrimary
+                                color = CyberTextPrimary,
+                                softWrap = true
                             )
                         }
 
-                        FlowRow(
+                        Surface(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                            shape = RoundedCornerShape(12.dp),
+                            color = CyberBgDeep.copy(alpha = 0.55f),
+                            border = BorderStroke(1.dp, CyberBorderGlow.copy(alpha = 0.5f))
                         ) {
-                            Button(
-                                onClick = { viewModel.stopCurrentTask() },
+                            FlowRow(
                                 modifier = Modifier
-                                    .height(48.dp)
-                                    .testTag("stop_active_task_button"),
-                                shape = MaterialTheme.shapes.small,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = StatusCancelled,
-                                    contentColor = Color.White
-                                ),
-                                contentPadding = PaddingValues(horizontal = 14.dp)
+                                    .fillMaxWidth()
+                                    .padding(6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Stop,
-                                    contentDescription = "إيقاف المهمة فوراً",
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(Modifier.width(4.dp))
-                                Text(text = "إيقاف", fontWeight = FontWeight.Bold)
-                            }
-
-                            if (canPauseOrTakeOver) {
                                 Button(
-                                    onClick = { viewModel.togglePauseResume() },
+                                    onClick = { viewModel.stopCurrentTask() },
                                     modifier = Modifier
                                         .height(48.dp)
-                                        .testTag("pause_resume_task_button"),
+                                        .testTag("stop_active_task_button"),
                                     shape = MaterialTheme.shapes.small,
                                     colors = ButtonDefaults.buttonColors(
-                                        containerColor = if (state.isPaused) StatusSuccess else CyberElectricBlue,
+                                        containerColor = StatusCancelled,
                                         contentColor = Color.White
                                     ),
                                     contentPadding = PaddingValues(horizontal = 14.dp)
                                 ) {
                                     Icon(
-                                        imageVector = if (state.isPaused) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
-                                        contentDescription = if (state.isPaused) "استئناف" else "إيقاف مؤقت",
+                                        imageVector = Icons.Rounded.Stop,
+                                        contentDescription = "إيقاف المهمة فوراً",
                                         modifier = Modifier.size(18.dp)
                                     )
                                     Spacer(Modifier.width(4.dp))
-                                    Text(
-                                        text = if (state.isPaused) "استئناف" else "إيقاف مؤقت",
-                                        fontWeight = FontWeight.Bold
-                                    )
+                                    Text(text = "إيقاف", fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                                }
+
+                                if (canPauseOrTakeOver) {
+                                    Button(
+                                        onClick = { viewModel.togglePauseResume() },
+                                        modifier = Modifier
+                                            .height(48.dp)
+                                            .testTag("pause_resume_task_button"),
+                                        shape = MaterialTheme.shapes.small,
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = if (state.isPaused) StatusSuccess else CyberElectricBlue,
+                                            contentColor = Color.White
+                                        ),
+                                        contentPadding = PaddingValues(horizontal = 14.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (state.isPaused) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
+                                            contentDescription = if (state.isPaused) "استئناف" else "إيقاف مؤقت",
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(
+                                            text = if (state.isPaused) "استئناف" else "إيقاف مؤقت",
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    }
+
+                                    OutlinedButton(
+                                        onClick = { viewModel.handOverControlToUser() },
+                                        modifier = Modifier
+                                            .height(48.dp)
+                                            .testTag("user_takeover_button"),
+                                        shape = MaterialTheme.shapes.small,
+                                        border = BorderStroke(1.dp, CyberElectricCyan),
+                                        contentPadding = PaddingValues(horizontal = 12.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.PanTool,
+                                            contentDescription = "أكمل بنفسي",
+                                            tint = CyberElectricCyan,
+                                            modifier = Modifier.size(17.dp)
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(
+                                            text = "أكمل بنفسي",
+                                            color = CyberElectricCyan,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    }
                                 }
 
                                 OutlinedButton(
-                                    onClick = { viewModel.handOverControlToUser() },
+                                    onClick = { viewModel.cancelCurrentTask() },
                                     modifier = Modifier
                                         .height(48.dp)
-                                        .testTag("user_takeover_button"),
+                                        .testTag("cancel_current_task_button"),
                                     shape = MaterialTheme.shapes.small,
-                                    border = BorderStroke(1.dp, CyberElectricCyan),
+                                    border = BorderStroke(1.dp, StatusCancelled),
                                     contentPadding = PaddingValues(horizontal = 12.dp)
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Rounded.PanTool,
-                                        contentDescription = "أكمل بنفسي",
-                                        tint = CyberElectricCyan,
+                                        imageVector = Icons.Rounded.Cancel,
+                                        contentDescription = "إلغاء المهمة الحالية",
+                                        tint = StatusCancelled,
                                         modifier = Modifier.size(17.dp)
                                     )
                                     Spacer(Modifier.width(4.dp))
-                                    Text(text = "أكمل بنفسي", color = CyberElectricCyan)
+                                    Text(
+                                        text = "إلغاء المهمة",
+                                        color = StatusCancelled,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
                                 }
-                            }
-
-                            OutlinedButton(
-                                onClick = { viewModel.cancelCurrentTask() },
-                                modifier = Modifier
-                                    .height(48.dp)
-                                    .testTag("cancel_current_task_button"),
-                                shape = MaterialTheme.shapes.small,
-                                border = BorderStroke(1.dp, StatusCancelled),
-                                contentPadding = PaddingValues(horizontal = 12.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Cancel,
-                                    contentDescription = "إلغاء المهمة الحالية",
-                                    tint = StatusCancelled,
-                                    modifier = Modifier.size(17.dp)
-                                )
-                                Spacer(Modifier.width(4.dp))
-                                Text(text = "إلغاء المهمة", color = StatusCancelled)
                             }
                         }
                     }
                 }
             }
 
-            // منطقة فقاعات الدردشة + الخطة النشطة
+            // 4) منطقة فقاعات الدردشة + الخطة النشطة بتباعد واسع ومنع أي قصّ أو تداخل
             LazyColumn(
                 state = listState,
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth(),
-                contentPadding = PaddingValues(vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                    .fillMaxWidth()
+                    .clipToBounds(),
+                contentPadding = PaddingValues(vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                item(key = "feature_spotlight_header") {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        if (messages.isEmpty()) {
-                            CyberPanelCard(modifier = Modifier.fillMaxWidth()) {
-                                Column(
-                                    modifier = Modifier.padding(14.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        text = "أهلاً بك في دردشة وكيل الهاتف",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = CyberElectricCyan
-                                    )
-                                    Text(
-                                        text = "جميع الميزات مجانية 100%: الدردشة النصية والصوتية، عرض ألعابك وتطبيقاتك وتشغيلها، قراءة شاشتك الحقيقية، إدارة المهام والتذكيرات والمنبهات، وتنفيذ الأوامر خطوة بخطوة. تذكّر أن الوكيل ليس لحظياً ويحتاج بضع ثوانٍ للتفكير في كل خطوة.",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = CyberTextSecondary
-                                    )
-                                }
+                if (displayMessages.isEmpty()) {
+                    item(key = "welcome_card") {
+                        CyberPanelCard(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = "أهلاً بك في دردشة وكيل الهاتف",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = CyberElectricCyan
+                                )
+                                Text(
+                                    text = "جميع الميزات مجانية 100%: الدردشة النصية والصوتية، عرض ألعابك وتطبيقاتك وتشغيلها، قراءة شاشتك الحقيقية، إدارة المهام والتذكيرات والمنبهات، وتنفيذ الأوامر خطوة بخطوة. تذكّر أن الوكيل ليس لحظياً ويحتاج بضع ثوانٍ للتفكير في كل خطوة.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = CyberTextSecondary,
+                                    softWrap = true
+                                )
                             }
                         }
-                        PlayWithAgentPromoCard(
-                            onTakeOverPlayClick = { viewModel.startGameplayGoal() },
-                            onExplainFeatureClick = { viewModel.openPlayFeatureDialog() },
-                            compact = messages.isNotEmpty()
-                        )
                     }
                 }
 
-                items(messages, key = { it.id }) { msg ->
+                item(key = "play_promo_card") {
+                    PlayWithAgentPromoCard(
+                        onTakeOverPlayClick = { viewModel.startGameplayGoal() },
+                        onExplainFeatureClick = { viewModel.openPlayFeatureDialog() },
+                        compact = displayMessages.isNotEmpty()
+                    )
+                }
+
+                items(displayMessages, key = { it.id }) { msg ->
                     ChatMessageBubble(
                         message = msg,
                         installedAppsByPackage = installedAppsByPackage,
@@ -491,35 +610,49 @@ fun CommandsScreen(
                 }
             }
 
-            // اقتراحات سريعة قابلة للضغط الفوري
-            LazyRow(
+            // 5) حاوية واحدة نظيفة للأوامر الجاهزة القابلة للتمرير أفقياً فوق شريط الإدخال
+            Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    .testTag("quick_presets_container"),
+                shape = RoundedCornerShape(14.dp),
+                color = CyberSurfaceNavy,
+                border = BorderStroke(1.dp, CyberBorderGlow.copy(alpha = 0.75f))
             ) {
-                items(quickSuggestions) { suggestion ->
-                    FilterChip(
-                        selected = false,
-                        onClick = { viewModel.analyzeAndPlanCommand(suggestion) },
-                        shape = MaterialTheme.shapes.small,
-                        colors = FilterChipDefaults.filterChipColors(
-                            containerColor = CyberSurfaceNavy,
-                            labelColor = CyberSoftCyan
-                        ),
-                        border = BorderStroke(1.dp, CyberBorderGlow),
-                        label = {
-                            Text(
-                                text = suggestion,
-                                style = MaterialTheme.typography.labelMedium,
-                                maxLines = 1
-                            )
-                        }
-                    )
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    items(quickSuggestions, key = { it }) { suggestion ->
+                        FilterChip(
+                            selected = false,
+                            enabled = !isAnyTaskRunning,
+                            onClick = { viewModel.analyzeAndPlanCommand(suggestion) },
+                            modifier = Modifier.heightIn(min = 40.dp),
+                            shape = MaterialTheme.shapes.small,
+                            colors = FilterChipDefaults.filterChipColors(
+                                containerColor = CyberBgDeep,
+                                labelColor = CyberSoftCyan,
+                                disabledContainerColor = CyberBgDeep.copy(alpha = 0.5f),
+                                disabledLabelColor = CyberTextSecondary
+                            ),
+                            border = BorderStroke(1.dp, CyberBorderGlow),
+                            label = {
+                                Text(
+                                    text = suggestion,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        )
+                    }
                 }
             }
 
-            // شريط إدخال الصوت والكتابة السفلي
+            // 6) شريط إدخال الصوت والكتابة السفلي
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -585,7 +718,8 @@ fun CommandsScreen(
                                 Text(
                                     text = "اكتب رسالتك أو أمرك...",
                                     color = CyberTextSecondary,
-                                    maxLines = 1
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             },
                             singleLine = false,
@@ -665,8 +799,186 @@ fun CommandsScreen(
 }
 
 @Composable
+private fun CompactErrorCard(
+    error: CompactErrorState,
+    isDetailsExpanded: Boolean,
+    appCheckDebugToken: String,
+    activeProjectId: String,
+    isRetrying: Boolean,
+    onRetry: () -> Unit,
+    onToggleDetails: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("compact_error_card"),
+        shape = RoundedCornerShape(14.dp),
+        color = StatusCancelledContainer,
+        border = BorderStroke(1.5.dp, StatusCancelled)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.ErrorOutline,
+                        contentDescription = null,
+                        tint = StatusCancelled,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Text(
+                        text = error.titleAr,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = StatusCancelled,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("error_dismiss_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "إغلاق التنبيه",
+                        tint = CyberTextSecondary
+                    )
+                }
+            }
+
+            Text(
+                text = error.summaryAr,
+                style = MaterialTheme.typography.bodySmall,
+                color = CyberTextPrimary,
+                softWrap = true
+            )
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = CyberBgDeep.copy(alpha = 0.6f),
+                border = BorderStroke(1.dp, CyberBorderGlow.copy(alpha = 0.55f))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(
+                        onClick = onRetry,
+                        enabled = !isRetrying,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("error_retry_button"),
+                        shape = MaterialTheme.shapes.small,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = CyberElectricCyan,
+                            contentColor = CyberOnCyan
+                        ),
+                        contentPadding = PaddingValues(horizontal = 12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "إعادة المحاولة",
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+
+                    if (error.technicalDetails.isNotBlank() || (BuildConfig.DEBUG && error.isAppCheckDebugError)) {
+                        OutlinedButton(
+                            onClick = onToggleDetails,
+                            modifier = Modifier
+                                .height(48.dp)
+                                .testTag("error_details_toggle_button"),
+                            shape = MaterialTheme.shapes.small,
+                            border = BorderStroke(1.dp, CyberBorderGlow),
+                            contentPadding = PaddingValues(horizontal = 12.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isDetailsExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                contentDescription = null,
+                                tint = CyberSoftCyan,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = if (isDetailsExpanded) "إخفاء" else "التفاصيل",
+                                color = CyberSoftCyan,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+                }
+            }
+
+            AnimatedVisibility(visible = isDetailsExpanded) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (error.technicalDetails.isNotBlank()) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = MaterialTheme.shapes.small,
+                            color = CyberBgDeep,
+                            border = BorderStroke(1.dp, CyberBorderGlow)
+                        ) {
+                            Text(
+                                text = error.technicalDetails,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CyberSoftCyan,
+                                softWrap = true,
+                                modifier = Modifier.padding(10.dp)
+                            )
+                        }
+                    }
+
+                    if (BuildConfig.DEBUG && error.isAppCheckDebugError && appCheckDebugToken.isNotBlank()) {
+                        DebugAppCheckTokenBox(
+                            appCheckDebugToken = appCheckDebugToken,
+                            activeProjectId = activeProjectId
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun ModelConnectionCard(
     status: ModelConnectionStatus,
+    statusNoticeAr: String,
+    lastModelTraceAr: String,
     appCheckDebugToken: String,
     activeProjectId: String,
     isExpanded: Boolean,
@@ -674,9 +986,6 @@ fun ModelConnectionCard(
     onCheckConnection: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
-    val clipboardManager = LocalClipboardManager.current
-
     val borderColor = when (status) {
         is ModelConnectionStatus.Connected -> StatusSuccess
         is ModelConnectionStatus.Checking -> CyberElectricCyan
@@ -695,7 +1004,7 @@ fun ModelConnectionCard(
         modifier = modifier
             .fillMaxWidth()
             .testTag("model_connection_card"),
-        shape = MaterialTheme.shapes.small,
+        shape = RoundedCornerShape(14.dp),
         color = containerColor,
         border = BorderStroke(1.dp, borderColor)
     ) {
@@ -703,7 +1012,7 @@ fun ModelConnectionCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -728,15 +1037,24 @@ fun ModelConnectionCard(
                                     text = "النموذج متصل (Gemini 3.8 Flash)",
                                     style = MaterialTheme.typography.labelLarge,
                                     fontWeight = FontWeight.Bold,
-                                    color = StatusSuccess
+                                    color = StatusSuccess,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
-                                    text = "زمن الاستجابة: ${status.latencyMs}ms",
+                                    text = if (lastModelTraceAr.isNotBlank()) {
+                                        lastModelTraceAr
+                                    } else {
+                                        "زمن الاستجابة: ${status.latencyMs}ms"
+                                    },
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = CyberTextSecondary
+                                    color = CyberTextSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
+
                         is ModelConnectionStatus.Checking -> {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(18.dp),
@@ -744,12 +1062,15 @@ fun ModelConnectionCard(
                                 color = CyberElectricCyan
                             )
                             Text(
-                                text = "جارٍ فحص اتصال النموذج بـ Gemini...",
+                                text = statusNoticeAr.ifBlank { "جارٍ فحص اتصال النموذج بـ Gemini..." },
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.SemiBold,
-                                color = CyberElectricCyan
+                                color = CyberElectricCyan,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
+
                         is ModelConnectionStatus.Disconnected -> {
                             Icon(
                                 imageVector = Icons.Rounded.CloudOff,
@@ -759,19 +1080,23 @@ fun ModelConnectionCard(
                             )
                             Column {
                                 Text(
-                                    text = "النموذج غير متصل [${status.category.titleAr}]",
+                                    text = status.category.titleAr,
                                     style = MaterialTheme.typography.labelLarge,
                                     fontWeight = FontWeight.Bold,
-                                    color = StatusCancelled
+                                    color = StatusCancelled,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
-                                    text = status.exactError.take(45),
+                                    text = "اضغط «التفاصيل» أو أعد الفحص",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = CyberTextSecondary,
-                                    maxLines = 1
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
+
                         ModelConnectionStatus.NotChecked -> {
                             Icon(
                                 imageVector = Icons.Rounded.CloudQueue,
@@ -782,45 +1107,55 @@ fun ModelConnectionCard(
                             Text(
                                 text = "اتصال النموذج لم يُفحص بعد",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = CyberTextSecondary
+                                color = CyberTextSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = onCheckConnection,
-                        enabled = status !is ModelConnectionStatus.Checking,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .testTag("check_model_connection_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Refresh,
-                            contentDescription = "فحص اتصال النموذج",
-                            tint = CyberElectricCyan,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
+                Spacer(Modifier.width(6.dp))
 
-                    IconButton(
-                        onClick = onToggleExpand,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .testTag("toggle_model_connection_details_button")
-                    ) {
-                        Icon(
-                            imageVector = if (isExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
-                            contentDescription = if (isExpanded) "إخفاء التفاصيل" else "عرض التفاصيل",
-                            tint = CyberTextSecondary,
-                            modifier = Modifier.size(18.dp)
-                        )
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = CyberBgDeep.copy(alpha = 0.65f),
+                    border = BorderStroke(1.dp, CyberBorderGlow.copy(alpha = 0.6f))
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = onCheckConnection,
+                            enabled = status !is ModelConnectionStatus.Checking,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("check_model_connection_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = "فحص اتصال النموذج",
+                                tint = CyberElectricCyan,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = onToggleExpand,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("toggle_model_connection_details_button")
+                        ) {
+                            Icon(
+                                imageVector = if (isExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                contentDescription = if (isExpanded) "إخفاء التفاصيل" else "عرض التفاصيل",
+                                tint = CyberTextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
                 }
             }
 
-            AnimatedVisibility(visible = isExpanded || status is ModelConnectionStatus.Disconnected) {
+            AnimatedVisibility(visible = isExpanded) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -831,9 +1166,11 @@ fun ModelConnectionCard(
                         Text(
                             text = status.explanationAr,
                             style = MaterialTheme.typography.bodySmall,
-                            color = CyberTextPrimary
+                            color = CyberTextPrimary,
+                            softWrap = true
                         )
                         Surface(
+                            modifier = Modifier.fillMaxWidth(),
                             shape = MaterialTheme.shapes.small,
                             color = CyberBgDeep,
                             border = BorderStroke(1.dp, CyberBorderGlow)
@@ -842,104 +1179,149 @@ fun ModelConnectionCard(
                                 text = status.exactError,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = CyberSoftCyan,
+                                softWrap = true,
+                                modifier = Modifier.padding(8.dp)
+                            )
+                        }
+                    } else if (status is ModelConnectionStatus.Connected) {
+                        Text(
+                            text = status.detailsAr,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = CyberTextPrimary,
+                            softWrap = true
+                        )
+                    }
+
+                    if (lastModelTraceAr.isNotBlank()) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = MaterialTheme.shapes.small,
+                            color = CyberBgDeep,
+                            border = BorderStroke(1.dp, CyberBorderGlow)
+                        ) {
+                            Text(
+                                text = lastModelTraceAr,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CyberSoftCyan,
+                                softWrap = true,
                                 modifier = Modifier.padding(8.dp)
                             )
                         }
                     }
 
                     if (BuildConfig.DEBUG && appCheckDebugToken.isNotBlank()) {
-                        Surface(
-                            shape = MaterialTheme.shapes.small,
-                            color = CyberBgDeep,
-                            border = BorderStroke(1.dp, CyberBorderGlow)
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(10.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.Key,
-                                            contentDescription = null,
-                                            tint = CyberElectricCyan,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Text(
-                                            text = "رمز تصحيح App Check (المعاينة):",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = CyberElectricCyan
-                                        )
-                                    }
-                                    Button(
-                                        onClick = {
-                                            clipboardManager.setText(AnnotatedString(appCheckDebugToken))
-                                            Toast.makeText(context, "تم نسخ رمز التصحيح إلى الحافظة", Toast.LENGTH_SHORT).show()
-                                        },
-                                        modifier = Modifier
-                                            .height(32.dp)
-                                            .testTag("copy_debug_token_button"),
-                                        shape = MaterialTheme.shapes.small,
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = CyberElectricCyan,
-                                            contentColor = CyberOnCyan
-                                        ),
-                                        contentPadding = PaddingValues(horizontal = 8.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.ContentCopy,
-                                            contentDescription = "نسخ",
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                        Spacer(Modifier.width(4.dp))
-                                        Text(
-                                            text = "نسخ الرمز",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
-
-                                Surface(
-                                    shape = MaterialTheme.shapes.small,
-                                    color = CyberSurfaceNavy,
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text(
-                                        text = appCheckDebugToken,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Medium,
-                                        color = CyberSoftCyan,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
-                                    )
-                                }
-
-                                val displayProject = if (activeProjectId.isNotBlank() && activeProjectId != "gen-lang-client-0140553990") {
-                                    "gen-lang-client-0140553990 (المشروع الحالي: $activeProjectId)"
-                                } else {
-                                    "gen-lang-client-0140553990"
-                                }
-
-                                Text(
-                                    text = "📌 لتفعيل ردود Gemini في المعاينة:\n1. افتح Firebase Console للمشروع: $displayProject\n2. اذهب إلى App Check ⬅ Apps ⬅ com.aistudio.phoneagent.wakeel\n3. اضغط «Manage debug tokens» وألصق هذا الرمز ثم احفظ.",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = CyberTextSecondary
-                                )
-                            }
-                        }
+                        DebugAppCheckTokenBox(
+                            appCheckDebugToken = appCheckDebugToken,
+                            activeProjectId = activeProjectId
+                        )
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun DebugAppCheckTokenBox(
+    appCheckDebugToken: String,
+    activeProjectId: String
+) {
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = CyberBgDeep,
+        border = BorderStroke(1.dp, CyberBorderGlow)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Key,
+                        contentDescription = null,
+                        tint = CyberElectricCyan,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "رمز تصحيح App Check (المعاينة):",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = CyberElectricCyan,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Button(
+                    onClick = {
+                        clipboardManager.setText(AnnotatedString(appCheckDebugToken))
+                        Toast.makeText(context, "تم نسخ رمز التصحيح إلى الحافظة", Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("copy_debug_token_button"),
+                    shape = MaterialTheme.shapes.small,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = CyberElectricCyan,
+                        contentColor = CyberOnCyan
+                    ),
+                    contentPadding = PaddingValues(horizontal = 12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.ContentCopy,
+                        contentDescription = "نسخ",
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = "نسخ الرمز",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
+
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = CyberSurfaceNavy,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = appCheckDebugToken,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Medium,
+                    color = CyberSoftCyan,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                )
+            }
+
+            val displayProject = if (activeProjectId.isNotBlank() && activeProjectId != "gen-lang-client-0140553990") {
+                "gen-lang-client-0140553990 (المشروع الحالي: $activeProjectId)"
+            } else {
+                "gen-lang-client-0140553990"
+            }
+
+            Text(
+                text = "لتفعيل ردود Gemini في المعاينة:\n1. افتح Firebase Console للمشروع: $displayProject\n2. اذهب إلى App Check ثم Apps ثم com.aistudio.phoneagent.wakeel\n3. اضغط «Manage debug tokens» وألصق هذا الرمز ثم احفظ.",
+                style = MaterialTheme.typography.labelSmall,
+                color = CyberTextSecondary,
+                softWrap = true
+            )
         }
     }
 }

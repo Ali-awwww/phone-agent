@@ -8,6 +8,7 @@ import com.example.data.local.ActionStatus
 import com.example.executor.ChatIntentRouter
 import com.example.executor.GameActionDecision
 import com.example.executor.GameGestureAction
+import com.example.executor.ModelRouteTier
 import com.example.overlay.AgentExecutionController
 import com.example.overlay.AgentFloatingControlManager
 import com.example.overlay.FloatingControlCallbacks
@@ -107,7 +108,8 @@ class GeneralGameEngine(
                 val prompt = buildGameObservationPrompt(goalAr, observation, recentActions, cycle)
                 val rawDecision = geminiRepository.conversationalReply(
                     userMessage = prompt,
-                    contextSummary = AgentPromptRules.enrichGameContextSummary(observation.toPromptSummary())
+                    contextSummary = AgentPromptRules.enrichGameContextSummary(observation.toPromptSummary()),
+                    modelTier = ModelRouteTier.FLASH
                 )
                 val decision = ChatIntentRouter.parseGameActionDecision(rawDecision)
 
@@ -197,7 +199,7 @@ class GeneralGameEngine(
         return when (decision.action) {
             GameGestureAction.TAP_TEXT -> {
                 val clicked = withContext(Dispatchers.Main) {
-                    decision.targetText.isNotBlank() && service.findAndClickByText(decision.targetText)
+                    decision.targetText.isNotBlank() && service.findAndClickHumanLike(decision.targetText)
                 }
                 if (clicked) true else service.performTapAt(decision.x, decision.y)
             }

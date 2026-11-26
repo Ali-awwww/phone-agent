@@ -107,15 +107,66 @@ class ChatIntentRouterTest {
     }
 
     @Test
-    fun `AgentPolicy permits new chat features and continues blocking sensitive or off-phone commands`() {
+    fun `what did i do routes to ShowActionHistory and bare remind me routes to PromptReminderDetails`() {
+        assertEquals(ChatRouteIntent.ShowActionHistory, ChatIntentRouter.classifyIntent("ماذا فعلت؟"))
+        assertEquals(ChatRouteIntent.ShowActionHistory, ChatIntentRouter.classifyIntent("اعرض السجل"))
+        assertEquals(ChatRouteIntent.PromptReminderDetails, ChatIntentRouter.classifyIntent("ذكّرني"))
+        assertEquals(ChatRouteIntent.PromptReminderDetails, ChatIntentRouter.classifyIntent("ذكرني"))
+    }
+
+    @Test
+    fun `classifies general questions and discussions as Lite and phone usage commands as Flash`() {
+        val generalPrompts = listOf(
+            "ما هي عاصمة فرنسا؟",
+            "اشرح لي نظرية النسبية",
+            "اكتب لي قصيدة جميلة عن البحر",
+            "كيف أبدأ تعلم البرمجة بنجاح",
+            "أخبرني نصيحة لتنظيم وقتي",
+            "مرحباً، كيف حالك اليوم؟"
+        )
+        for (prompt in generalPrompts) {
+            assertTrue(
+                "Expected ConversationalChat for: $prompt",
+                ChatIntentRouter.classifyIntent(prompt, listOf("واتساب", "الساعة")) is ChatRouteIntent.ConversationalChat
+            )
+            assertEquals(
+                "Expected LITE tier for general prompt: $prompt",
+                ModelRouteTier.LITE,
+                ChatIntentRouter.classifyModelTier(prompt, listOf("واتساب", "الساعة"))
+            )
+        }
+
+        val phonePrompts = listOf(
+            "افتح الإعدادات",
+            "شغّل تطبيق الساعة",
+            "رتّب تطبيقاتي في مجلدات",
+            "أرسل رسالة لوالدي عبر واتساب",
+            "تولّي اللعب",
+            "ماذا في شاشتي؟",
+            "ارفع مستوى الصوت",
+            "افتح واتساب"
+        )
+        for (prompt in phonePrompts) {
+            assertEquals(
+                "Expected FLASH tier for phone command: $prompt",
+                ModelRouteTier.FLASH,
+                ChatIntentRouter.classifyModelTier(prompt, listOf("واتساب", "الساعة"))
+            )
+        }
+    }
+
+    @Test
+    fun `AgentPolicy permits general questions and phone commands while blocking sensitive actions`() {
         val policy = AgentPolicy()
         assertTrue(policy.evaluateCommand("اعرض ألعابي", emptyList()).allowed)
         assertTrue(policy.evaluateCommand("ماذا في شاشتي؟", emptyList()).allowed)
+        assertTrue(policy.evaluateCommand("ماذا فعلت؟", emptyList()).allowed)
+        assertTrue(policy.evaluateCommand("ذكّرني", emptyList()).allowed)
         assertTrue(policy.evaluateCommand("ذكّرني بعد 10 دقائق بشرب الماء", emptyList()).allowed)
         assertTrue(policy.evaluateCommand("العب مع الوكيل", emptyList()).allowed)
         assertTrue(policy.evaluateCommand("مرحبا", emptyList()).allowed)
+        assertTrue(policy.evaluateCommand("أخبرني عن عاصمة فرنسا", emptyList()).allowed)
 
-        assertFalse(policy.evaluateCommand("أخبرني عن عاصمة فرنسا", emptyList()).allowed)
         assertNotNull(policy.findForbiddenCategory("تجاوز قفل الشاشة بدون بصمة"))
     }
 }

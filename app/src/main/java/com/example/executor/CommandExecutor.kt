@@ -16,6 +16,7 @@ import com.example.model.AgentPlanStep
 import com.example.model.ScreenVerificationResult
 import com.example.model.StepActionType
 import com.example.model.StepVerificationStatus
+import com.example.organizer.AppOrganizer
 import com.example.organizer.InstalledAppInfo
 import com.example.policy.AgentPolicy
 import com.example.service.ScreenStateBridge
@@ -207,8 +208,7 @@ class CommandExecutor(
         val targetApp = findMatchingAppPackage(step.targetAppName, installedApps)
             ?: return false to "لم أجد التطبيق «${step.targetAppName}» مثبتاً على الجهاز."
 
-        val launchIntent = context.packageManager.getLaunchIntentForPackage(targetApp.packageName)
-            ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+        val launchIntent = AppOrganizer.createLaunchIntent(context, targetApp.packageName)
             ?: return false to "لا يمكن فتح التطبيق «${targetApp.label}» مباشرة."
 
         return try {
@@ -219,7 +219,7 @@ class CommandExecutor(
         }
     }
 
-    private fun executeSearchInApp(
+    private suspend fun executeSearchInApp(
         step: AgentPlanStep,
         installedApps: List<InstalledAppInfo>
     ): Pair<Boolean, String> {
@@ -245,8 +245,8 @@ class CommandExecutor(
             if (typed) {
                 return true to "تم إدخال عبارة البحث «$query» داخل حقل البحث الفعلي."
             }
-            val clickedSearch = service.findAndClickByText("بحث") ||
-                service.findAndClickByText("Search")
+            val clickedSearch = service.findAndClickHumanLike("بحث") ||
+                service.findAndClickHumanLike("Search")
             if (clickedSearch) {
                 return true to "تم الضغط على زر البحث الفعلي داخل التطبيق."
             }
@@ -408,11 +408,11 @@ class CommandExecutor(
         }
     }
 
-    private fun executeAccessibilityTap(step: AgentPlanStep): Pair<Boolean, String> {
+    private suspend fun executeAccessibilityTap(step: AgentPlanStep): Pair<Boolean, String> {
         val service = ScreenStateBridge.getService()
             ?: return false to ScreenVerifier.MSG_ELEMENT_NOT_FOUND
         val target = step.targetQueryOrText.ifBlank { step.titleAr }
-        val clicked = service.findAndClickByText(target)
+        val clicked = service.findAndClickHumanLike(target)
         return if (clicked) {
             true to "تم الضغط على «$target»."
         } else {
@@ -432,10 +432,10 @@ class CommandExecutor(
         }
     }
 
-    private fun executeAccessibilityScroll(): Pair<Boolean, String> {
+    private suspend fun executeAccessibilityScroll(): Pair<Boolean, String> {
         val service = ScreenStateBridge.getService()
             ?: return false to ScreenVerifier.MSG_ELEMENT_NOT_FOUND
-        val ok = service.scrollForward()
+        val ok = service.scrollForward() || service.performSwipe(0.5f, 0.78f, 0.5f, 0.28f)
         return if (ok) {
             true to "تم تمرير الشاشة لعرض المزيد من المحتوى."
         } else {

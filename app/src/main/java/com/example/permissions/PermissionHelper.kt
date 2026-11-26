@@ -11,7 +11,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Process
 import android.provider.Settings
+import android.widget.Toast
 import androidx.core.content.ContextCompat
+import com.example.R
 import com.example.service.PhoneAgentAccessibilityService
 import com.example.service.ScreenStateBridge
 
@@ -34,6 +36,28 @@ data class AgentPermissionItem(
 )
 
 object PermissionHelper {
+
+    const val OUR_APPS_SHOWCASE_URL: String = "https://apps-showcase.pages.dev"
+
+    fun buildExternalBrowserIntent(url: String = OUR_APPS_SHOWCASE_URL): Intent {
+        return Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+    }
+
+    fun openExternalBrowser(context: Context, url: String = OUR_APPS_SHOWCASE_URL): Boolean {
+        return try {
+            context.startActivity(buildExternalBrowserIntent(url))
+            true
+        } catch (_: Exception) {
+            Toast.makeText(
+                context,
+                context.getString(R.string.our_apps_browser_error),
+                Toast.LENGTH_SHORT
+            ).show()
+            false
+        }
+    }
 
     fun getAllPermissionStatuses(context: Context): List<AgentPermissionItem> {
         return listOf(
@@ -108,15 +132,32 @@ object PermissionHelper {
         }
     }
 
+    @Suppress("DEPRECATION")
     fun isQueryAllPackagesGranted(context: Context): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            ContextCompat.checkSelfPermission(
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return true
+        if (ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.QUERY_ALL_PACKAGES
             ) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
+        ) {
+            return true
         }
+        return runCatching {
+            val pm = context.packageManager
+            val pkgInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getPackageInfo(
+                    context.packageName,
+                    PackageManager.PackageInfoFlags.of(PackageManager.GET_PERMISSIONS.toLong())
+                )
+            } else {
+                pm.getPackageInfo(context.packageName, PackageManager.GET_PERMISSIONS)
+            }
+            val perms = pkgInfo.requestedPermissions ?: return@runCatching false
+            val flags = pkgInfo.requestedPermissionsFlags ?: return@runCatching false
+            val idx = perms.indexOf(Manifest.permission.QUERY_ALL_PACKAGES)
+            idx >= 0 && idx < flags.size &&
+                (flags[idx] and android.content.pm.PackageInfo.REQUESTED_PERMISSION_GRANTED) != 0
+        }.getOrDefault(false)
     }
 
     fun isUsageAccessGranted(context: Context): Boolean {

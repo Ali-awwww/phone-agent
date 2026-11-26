@@ -46,6 +46,7 @@ private val cachedDebugSecretRef = AtomicReference<String?>(null)
 
 enum class DisconnectionCategory(val titleAr: String) {
     APP_CHECK_INVALID("رفض رمز App Check"),
+    MODEL_BUSY("خوادم النموذج مشغولة مؤقتاً"),
     NETWORK_ERROR("خطأ في الشبكة والاتصال"),
     MODEL_ERROR("خطأ في استجابة النموذج"),
     UNKNOWN("خطأ غير متوقع")
@@ -301,7 +302,8 @@ fun clearStoredAppCheckTokens(context: Context): Int {
 }
 
 /**
- * Classifies an exception into App Check rejection, network issue, or model error.
+ * Classifies an exception into App Check rejection, temporary server overload (503/high demand),
+ * network issue, or model error.
  */
 fun classifyModelError(throwable: Throwable?): ModelErrorClassification {
     if (throwable == null) {
@@ -314,6 +316,7 @@ fun classifyModelError(throwable: Throwable?): ModelErrorClassification {
     val visited = HashSet<Throwable>()
     var current: Throwable? = throwable
     var isAppCheck = false
+    var isOverload = false
     var isNetwork = false
     var isModel = false
 
@@ -330,6 +333,10 @@ fun classifyModelError(throwable: Throwable?): ModelErrorClassification {
         ) {
             isAppCheck = true
             break
+        }
+
+        if (isModelOverloadMessage(msg)) {
+            isOverload = true
         }
 
         if (current is java.net.UnknownHostException ||
@@ -361,7 +368,12 @@ fun classifyModelError(throwable: Throwable?): ModelErrorClassification {
         isAppCheck -> ModelErrorClassification(
             category = DisconnectionCategory.APP_CHECK_INVALID,
             exactErrorMessage = exact,
-            explanationAr = "رفضت خوادم Firebase التحقق من حماية التطبيق (Firebase App Check token is invalid). في بيئة المعاينة والتصحيح، يجب إضافة رمز التصحيح في Firebase Console لمشروعك لتتمكن من استخدام Gemini."
+            explanationAr = "رفضت خوادم Firebase التحقق من حماية التطبيق (Firebase App Check). في بيئة المعاينة، تأكد من تسجيل رمز التصحيح في Firebase Console."
+        )
+        isOverload -> ModelErrorClassification(
+            category = DisconnectionCategory.MODEL_BUSY,
+            exactErrorMessage = exact,
+            explanationAr = "خوادم الذكاء الاصطناعي في Google تشهد ضغطاً مرتفعاً مؤقتاً (503). هذا ضغط من الخادم نفسه وليس من جهازك؛ أعد المحاولة بعد لحظات."
         )
         isNetwork -> ModelErrorClassification(
             category = DisconnectionCategory.NETWORK_ERROR,
@@ -376,9 +388,64 @@ fun classifyModelError(throwable: Throwable?): ModelErrorClassification {
         else -> ModelErrorClassification(
             category = DisconnectionCategory.UNKNOWN,
             exactErrorMessage = exact,
-            explanationAr = "تعذر إكمال الاتصال بنموذج الذكاء الاصطناعي: $exact"
+            explanationAr = "تعذر إكمال الاتصال بنموذج الذكاء الاصطناعي مؤقتاً، يمكنك إعادة المحاولة."
         )
     }
+}
+
+private fun isModelOverloadMessage(msg: String): Boolean {
+    return msg.contains("503", ignoreCase = true) ||
+        msg.contains("UNAVAILABLE", ignoreCase = true) ||
+        msg.contains("overloaded", ignoreCase = true) ||
+        msg.contains("high demand", ignoreCase = true) ||
+        msg.contains("currently experiencing high", ignoreCase = true) ||
+        msg.contains("try again later", ignoreCase = true) ||
+        msg.contains("server capacity", ignoreCase = true) ||
+        msg.contains("service is currently unavailable", ignoreCase = true)
+}
+
+/**
+ * Returns true when [error] (or any exception in its cause chain) indicates a temporary
+ * model/server capacity overload (e.g., HTTP 503, UNAVAILABLE, high demand, overloaded),
+ * and is NOT an App Check token rejection.
+ */
+fun isModelOverloadError(error: Throwable?): Boolean {
+    if (error == null || isAppCheckTokenError(error)) return false
+    val visited = HashSet<Throwable>()
+    var current = error
+    while (current != null && visited.add(current)) {
+        if (isModelOverloadMessage(current.message.orEmpty())) {
+            return true
+        }
+        current = current.cause
+    }
+    return false
+}
+
+/**
+ * Returns true when [error] indicates a specific model ID is temporarily or permanently
+ * unavailable/unsupported/not found (so we can safely fall back to the alternate model),
+ * excluding App Check errors.
+ */
+fun isModelUnavailableError(error: Throwable?): Boolean {
+    if (error == null || isAppCheckTokenError(error)) return false
+    val visited = HashSet<Throwable>()
+    var current = error
+    while (current != null && visited.add(current)) {
+        val msg = current.message.orEmpty()
+        if (msg.contains("404", ignoreCase = true) ||
+            msg.contains("NOT_FOUND", ignoreCase = true) ||
+            msg.contains("model not found", ignoreCase = true) ||
+            msg.contains("is not found", ignoreCase = true) ||
+            msg.contains("is not supported", ignoreCase = true) ||
+            msg.contains("unsupported model", ignoreCase = true) ||
+            msg.contains("deprecated", ignoreCase = true)
+        ) {
+            return true
+        }
+        current = current.cause
+    }
+    return false
 }
 
 /**

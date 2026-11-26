@@ -137,10 +137,12 @@ class AppsViewModel(
     }
 
     fun openApp(context: Context, app: InstalledAppInfo) {
-        val intent = context.packageManager.getLaunchIntentForPackage(app.packageName)
-            ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+        val intent = AppOrganizer.createLaunchIntent(context, app.packageName)
         if (intent != null) {
-            context.startActivity(intent)
+            runCatching { context.startActivity(intent) }
+                .onFailure { err ->
+                    _state.update { it.copy(statusMessage = "تعذر فتح «${app.label}»: ${err.localizedMessage}") }
+                }
         } else {
             _state.update { it.copy(statusMessage = "لا يمكن فتح «${app.label}» مباشرة.") }
         }

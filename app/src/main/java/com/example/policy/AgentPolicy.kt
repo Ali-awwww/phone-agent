@@ -26,15 +26,16 @@ class AgentPolicy {
 
     companion object {
         val ALLOWED_SCOPES_AR: List<String> = listOf(
+            "الإجابة عن الأسئلة العامة والنقاش والاستشارات المعرفية بالعربية",
             "تنظيم التطبيقات (عرض، بحث، تصنيف في مجلدات، نقل، إخفاء)",
             "تنفيذ الأوامر داخل التطبيقات (فتح تطبيق، بحث داخله، منبه، تذكير، رسالة بموافقتك، إعدادات جهاز بسيطة)",
-            "تجربة التطبيقات وتلخيصها بالعربية انطلاقاً من الشاشة الفعلية"
+            "تجربة التطبيقات وقراءة الشاشة الحقيقية واللعب كالإنسان خطوة بخطوة"
         )
 
         val FORBIDDEN_ITEMS_AR: List<String> = ForbiddenCategory.entries.map { it.titleAr }
 
         const val SUGGESTION_AR: String =
-            "أستطيع مساعدتك في ثلاثة أمور فقط: تنظيم التطبيقات، تنفيذ الأوامر داخل التطبيقات، وتجربة التطبيقات وتلخيصها. جرّب مثلاً: «رتّب تطبيقاتي في مجلدات» أو «افتح المنبه» أو «جرّب تطبيقاً ولخّصه»."
+            "يمكنك سؤالي في أي موضوع عام أو استشارة، أو طلب تنفيذ مهام الهاتف مثل: «رتّب تطبيقاتي في مجلدات» أو «افتح المنبه» أو «ماذا في شاشتي؟»."
     }
 
     private data class ForbiddenRule(
@@ -145,7 +146,7 @@ class AgentPolicy {
         Regex("(?:اضغط|انقر|مرر|اسحب|امسح|تصفح|شاشة|شاشتي|الشاشة|زر|قائمة|(?:اكتب|ادخل)\\s+(?:في|داخل|في\\s+حقل|في\\s+مربع|في\\s+التطبيق|رسالة))"),
         Regex("\\b(?:open|launch|search|alarm|reminder|task|tasks|message|wifi|bluetooth|volume|brightness|settings|scroll|tap|click|swipe|play|game|games)\\b", RegexOption.IGNORE_CASE),
         // 3. تجربة التطبيقات وقراءة الشاشة واللعب العام والدردشة الترحيبية بالوكيل
-        Regex("(?:جرب|تجربة|اختبر|اختبار|لخص|تلخيص|ملخص|افحص|فحص|استكشف|محتوي\\s*التطبيق|ميزات\\s*التطبيق|اقرا\\s*الشاشة|اشرح\\s*التطبيق|ماذا\\s*في\\s*شاشتي|ما\\s*في\\s*شاشتي|العب|لعب|تولي)"),
+        Regex("(?:جرب|تجربة|اختبر|اختبار|لخص|تلخيص|ملخص|افحص|فحص|استكشف|محتوي\\s*التطبيق|ميزات\\s*التطبيق|اقرا\\s*الشاشة|اشرح\\s*التطبيق|ماذا\\s*في\\s*شاشتي|ما\\s*في\\s*شاشتي|ماذا\\s*فعلت|سجل|العب|لعب|تولي)"),
         Regex("(?:مرحبا|اهلا|سلام|السلام\\s*عليكم|صباح\\s*الخير|مساء\\s*الخير|شكرا|مساعدة|ساعدني|كيف\\s*حالك|من\\s*انت|عرفني|فحص|اتصال|متصل|تكلم|الوكيل|يا\\s*وكيل)")
     )
 
@@ -160,6 +161,19 @@ class AgentPolicy {
         return null
     }
 
+    fun isPhoneCommandHint(
+        command: String,
+        knownAppNames: List<String> = emptyList()
+    ): Boolean {
+        val normalized = normalizeArabic(command)
+        if (normalized.isBlank()) return false
+        if (inScopeKeywords.any { it.containsMatchIn(normalized) }) return true
+        return knownAppNames.any { appLabel ->
+            val cleanLabel = normalizeArabic(appLabel)
+            cleanLabel.length >= 2 && normalized.contains(cleanLabel, ignoreCase = true)
+        }
+    }
+
     fun evaluateCommand(
         command: String,
         knownAppNames: List<String> = emptyList()
@@ -168,38 +182,30 @@ class AgentPolicy {
         if (trimmed.isBlank()) {
             return PolicyDecision(
                 allowed = false,
-                reasonAr = "يرجى كتابة أمر واضح أولاً. $SUGGESTION_AR"
+                reasonAr = "يرجى كتابة رسالتك أو أمرك أولاً. $SUGGESTION_AR"
             )
         }
 
-        // 1. فحص القائمة الممنوعة الثمانية قبل أي اتصال بـ Gemini
+        // 1. فحص القائمة الممنوعة الثمانية للأفعال الحساسة/الممنوعة قبل أي اتصال بـ Gemini
         val forbidden = findForbiddenCategory(trimmed)
         if (forbidden != null) {
             return PolicyDecision(
                 allowed = false,
-                reasonAr = "عذراً، لا أستطيع تنفيذ أي طلب يتعلق بـ«${forbidden.titleAr}» حفاظاً على أمانك وخصوصيتك. $SUGGESTION_AR",
+                reasonAr = "عذراً، لا أستطيع تنفيذ أي إجراء يتعلق بـ«${forbidden.titleAr}» حفاظاً على أمانك وخصوصيتك. $SUGGESTION_AR",
                 violationCategory = forbidden
             )
         }
 
-        // 2. التحقق من أن الأمر ضمن النطاق المسموح (تنظيم التطبيقات / تنفيذ أوامر الهاتف / تجربة وتلخيص التطبيقات)
-        val normalized = normalizeArabic(trimmed)
-        val matchesScopeKeyword = inScopeKeywords.any { it.containsMatchIn(normalized) }
-        val mentionsInstalledApp = knownAppNames.any { appLabel ->
-            val cleanLabel = normalizeArabic(appLabel)
-            cleanLabel.length >= 2 && normalized.contains(cleanLabel, ignoreCase = true)
+        // 2. إزالة القيد عن الأسئلة العامة والنقاش والاستشارات:
+        // الوكيل يجيب عن أي سؤال عام أو نقاش، وينفذ أوامر الهاتف وفق قواعد الأمان والتحقق من الشاشة.
+        val reason = if (isPhoneCommandHint(trimmed, knownAppNames)) {
+            "أمر هاتف مسموح وفق سياسة الأمان."
+        } else {
+            "طلب عام/نقاش مسموح."
         }
-
-        if (!matchesScopeKeyword && !mentionsInstalledApp) {
-            return PolicyDecision(
-                allowed = false,
-                reasonAr = "عذراً، هذا الطلب خارج نطاق عملي؛ أنا مخصّص لمهام الهاتف فقط ولا أجيب عن الأسئلة العامة أو المواضيع الخارجية. $SUGGESTION_AR"
-            )
-        }
-
         return PolicyDecision(
             allowed = true,
-            reasonAr = "الأمر ضمن النطاق المسموح."
+            reasonAr = reason
         )
     }
 

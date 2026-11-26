@@ -1,6 +1,7 @@
 package com.example.organizer
 
 import android.app.usage.UsageStatsManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -36,6 +37,32 @@ class AppOrganizer(
     private val actionLogRepository: ActionLogRepository,
     private val geminiRepository: GeminiRepository
 ) {
+    companion object {
+        fun createLaunchIntent(context: Context, packageName: String): Intent? {
+            val pm = context.packageManager
+            pm.getLaunchIntentForPackage(packageName)?.let { intent ->
+                return intent.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+            }
+            val queryIntent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_LAUNCHER)
+                setPackage(packageName)
+            }
+            val match = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.queryIntentActivities(
+                    queryIntent,
+                    PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_ALL.toLong())
+                ).firstOrNull()
+            } else {
+                @Suppress("DEPRECATION")
+                pm.queryIntentActivities(queryIntent, PackageManager.MATCH_ALL).firstOrNull()
+            } ?: return null
+
+            val activityInfo = match.activityInfo ?: return null
+            return Intent.makeMainActivity(ComponentName(activityInfo.packageName, activityInfo.name))
+                .apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+        }
+    }
+
     val organizationsFlow: Flow<List<AppOrganizationEntity>> =
         appOrganizationDao.observeAllOrganizations()
 
@@ -48,10 +75,13 @@ class AppOrganizer(
         }
 
         val resolveInfos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pm.queryIntentActivities(mainIntent, PackageManager.ResolveInfoFlags.of(0))
+            pm.queryIntentActivities(
+                mainIntent,
+                PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_ALL.toLong())
+            )
         } else {
             @Suppress("DEPRECATION")
-            pm.queryIntentActivities(mainIntent, 0)
+            pm.queryIntentActivities(mainIntent, PackageManager.MATCH_ALL)
         }
 
         val usageMap = queryRecentUsageMap()
@@ -191,8 +221,7 @@ class AppOrganizer(
     }
 
     suspend fun tryAndSummarizeApp(app: InstalledAppInfo): String {
-        val launchIntent = context.packageManager.getLaunchIntentForPackage(app.packageName)
-            ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+        val launchIntent = createLaunchIntent(context, app.packageName)
             ?: throw IllegalStateException("لا يمكن فتح التطبيق «${app.label}».")
 
         context.startActivity(launchIntent)
@@ -274,8 +303,12 @@ class AppOrganizer(
                 .any { text.contains(it) } -> AppFolder.COMMUNICATION
             listOf("docs", "sheets", "drive", "gmail", "outlook", "office", "slack", "teams", "zoom", "meet", "calendar", "notes", "keep", "عمل", "بريد", "ملاحظات", "تقويم")
                 .any { text.contains(it) } -> AppFolder.WORK
-            listOf("game", "pubg", "chess", "puzzle", "roblox", "minecraft", "clash", "unity", "ألعاب", "لعبة")
-                .any { text.contains(it) } -> AppFolder.GAMES
+            listOf(
+                "game", "pubg", "chess", "puzzle", "roblox", "minecraft", "clash", "unity",
+                "arcade", "racing", "shooter", "strategy", "trivia", "sudoku", "candy",
+                "subway", "freefire", "garena", "supercell", "brawl", "ludo", "domino",
+                "ألعاب", "العاب", "لعبة", "شطرنج", "لودو", "سباق", "كلمات"
+            ).any { text.contains(it) } -> AppFolder.GAMES
             listOf("amazon", "noon", "aliexpress", "ebay", "shop", "store", "market", "shein", "talabat", "hungerstation", "تسوق", "متجر", "طلبات")
                 .any { text.contains(it) } -> AppFolder.SHOPPING
             listOf("youtube", "spotify", "netflix", "music", "video", "camera", "gallery", "photos", "tiktok", "instagram", "twitch", "وسائط", "فيديو", "موسيقى", "كاميرا", "صور")

@@ -10,6 +10,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.data.ai.GeminiRepository
+import com.example.data.ai.ModelResponseMetadata
 import com.example.data.local.ActionLogRepository
 import com.example.data.local.ActionStatus
 import com.example.data.local.AgentTaskEntity
@@ -61,6 +62,22 @@ import com.example.security.getEffectiveDebugSecret
 
 private const val TAG = "CommandsViewModel"
 
+enum class ErrorRetryType {
+    CONNECTION_CHECK,
+    COMMAND,
+    VOICE,
+    GAMEPLAY
+}
+
+data class CompactErrorState(
+    val titleAr: String,
+    val summaryAr: String,
+    val technicalDetails: String,
+    val isAppCheckDebugError: Boolean = false,
+    val retryCommand: String? = null,
+    val retryType: ErrorRetryType = ErrorRetryType.CONNECTION_CHECK
+)
+
 sealed interface ModelConnectionStatus {
     data object NotChecked : ModelConnectionStatus
     data object Checking : ModelConnectionStatus
@@ -99,7 +116,10 @@ data class CommandsScreenState(
     val modelConnectionStatus: ModelConnectionStatus = ModelConnectionStatus.NotChecked,
     val appCheckDebugToken: String = "",
     val activeProjectId: String = "",
-    val isModelStatusExpanded: Boolean = true
+    val isModelStatusExpanded: Boolean = false,
+    val activeError: CompactErrorState? = null,
+    val isErrorDetailsExpanded: Boolean = false,
+    val lastModelTraceAr: String = ""
 ) {
     val isAnyTaskRunning: Boolean
         get() = isBusyWorking || uiState is CommandsUiState.Planning || isExecuting || isGameplayRunning
@@ -139,6 +159,9 @@ class CommandsViewModel(
     private var gameLoopJob: Job? = null
     private var approvalDeferred: CompletableDeferred<Boolean>? = null
     private var cachedInstalledApps: List<InstalledAppInfo> = emptyList()
+    private var lastSubmittedCommand: String? = null
+    private var lastRecordedAudio: Pair<ByteArray, String>? = null
+    private var lastGameplayGoal: String? = null
 
     init {
         val debugToken = if (BuildConfig.DEBUG) {
@@ -162,17 +185,71 @@ class CommandsViewModel(
         _state.update { it.copy(isModelStatusExpanded = !it.isModelStatusExpanded) }
     }
 
+    fun toggleErrorDetailsExpanded() {
+        _state.update { it.copy(isErrorDetailsExpanded = !it.isErrorDetailsExpanded) }
+    }
+
+    fun dismissActiveError() {
+        _state.update {
+            it.copy(
+                activeError = null,
+                isErrorDetailsExpanded = false,
+                uiState = if (it.uiState is CommandsUiState.Error) CommandsUiState.Idle else it.uiState
+            )
+        }
+    }
+
+    fun retryActiveError() {
+        val error = _state.value.activeError
+        dismissActiveError()
+        when (error?.retryType) {
+            ErrorRetryType.COMMAND -> {
+                val cmd = error.retryCommand ?: lastSubmittedCommand
+                if (!cmd.isNullOrBlank()) {
+                    analyzeAndPlanCommand(cmd, addUserBubble = false)
+                } else {
+                    checkModelConnection()
+                }
+            }
+            ErrorRetryType.VOICE -> {
+                val audio = lastRecordedAudio
+                if (audio != null) {
+                    processRecordedAudio(audio.first, audio.second)
+                } else {
+                    checkModelConnection()
+                }
+            }
+            ErrorRetryType.GAMEPLAY -> {
+                startGameplayGoal(lastGameplayGoal ?: "العب اللعبة أو التطبيق الظاهر على الشاشة كالإنسان خطوة بخطوة")
+            }
+            ErrorRetryType.CONNECTION_CHECK, null -> checkModelConnection()
+        }
+    }
+
     fun checkModelConnection(isInitialSelfCheck: Boolean = false) {
         viewModelScope.launch {
-            _state.update { it.copy(modelConnectionStatus = ModelConnectionStatus.Checking) }
+            _state.update {
+                it.copy(
+                    modelConnectionStatus = ModelConnectionStatus.Checking,
+                    activeError = if (!isInitialSelfCheck) null else it.activeError,
+                    isErrorDetailsExpanded = false
+                )
+            }
             val startTime = System.currentTimeMillis()
             try {
-                val (_, details) = geminiRepository.pingModelTest()
+                val (_, details) = geminiRepository.pingModelTest(
+                    onStatusUpdate = { statusMsg ->
+                        _state.update { it.copy(statusNoticeAr = statusMsg) }
+                    }
+                )
                 val latency = System.currentTimeMillis() - startTime
                 Log.i("ModelConnection", "Self-check SUCCEEDED in ${latency}ms: $details (initial=$isInitialSelfCheck)")
                 _state.update {
                     it.copy(
-                        modelConnectionStatus = ModelConnectionStatus.Connected(latency, details)
+                        modelConnectionStatus = ModelConnectionStatus.Connected(latency, details),
+                        statusNoticeAr = "",
+                        activeError = null,
+                        isErrorDetailsExpanded = false
                     )
                 }
             } catch (e: CancellationException) {
@@ -184,37 +261,56 @@ class CommandsViewModel(
                     "Self-check FAILED: category=${classification.category.name}, exactMsg=${classification.exactErrorMessage}, explanation=${classification.explanationAr}, initial=$isInitialSelfCheck",
                     e
                 )
+                val errorCard = if (!isInitialSelfCheck) {
+                    CompactErrorState(
+                        titleAr = classification.category.titleAr,
+                        summaryAr = classification.explanationAr,
+                        technicalDetails = classification.exactErrorMessage,
+                        isAppCheckDebugError = classification.category == DisconnectionCategory.APP_CHECK_INVALID,
+                        retryType = ErrorRetryType.CONNECTION_CHECK
+                    )
+                } else {
+                    null
+                }
                 _state.update {
                     it.copy(
+                        statusNoticeAr = "",
                         modelConnectionStatus = ModelConnectionStatus.Disconnected(
                             category = classification.category,
                             exactError = classification.exactErrorMessage,
                             explanationAr = classification.explanationAr
-                        )
+                        ),
+                        activeError = errorCard ?: it.activeError,
+                        isErrorDetailsExpanded = false
                     )
                 }
             }
         }
     }
 
-    private suspend fun handleGeminiFailure(contextTag: String, e: Exception) {
+    private fun handleGeminiFailure(
+        contextTag: String,
+        e: Exception,
+        retryType: ErrorRetryType = ErrorRetryType.CONNECTION_CHECK,
+        retryCommand: String? = null
+    ) {
         Log.e(TAG, "$contextTag failed", e)
         val classification = classifyModelError(e)
-        val debugToken = _state.value.appCheckDebugToken
-        val projId = _state.value.activeProjectId.ifBlank { "gen-lang-client-0140553990" }
-
-        val debugTokenSection = if (BuildConfig.DEBUG && classification.category == DisconnectionCategory.APP_CHECK_INVALID && debugToken.isNotBlank()) {
-            "\n\n🔑 رمز تصحيح App Check الحالي للمعاينة:\n$debugToken\n\n📌 خطوات تسجيل الرمز في Firebase Console:\n1. افتح Firebase Console للمشروع: gen-lang-client-0140553990 (المشروع الحالي: $projId)\n2. انتقل إلى App Check ⬅ Apps ⬅ com.aistudio.phoneagent.wakeel\n3. اضغط «Manage debug tokens» وأضف هذا الرمز ثم احفظ."
-        } else ""
-
-        val userNotice = "تعذر الاتصال بـ Gemini [${classification.category.titleAr}]:\n${classification.explanationAr}\n\nالتفاصيل: ${classification.exactErrorMessage}$debugTokenSection"
-
-        chatHistoryRepository.addAgentMessage(userNotice, ChatMessageType.ERROR)
+        val compactError = CompactErrorState(
+            titleAr = classification.category.titleAr,
+            summaryAr = classification.explanationAr,
+            technicalDetails = classification.exactErrorMessage,
+            isAppCheckDebugError = classification.category == DisconnectionCategory.APP_CHECK_INVALID,
+            retryCommand = retryCommand,
+            retryType = retryType
+        )
         _state.update {
             it.copy(
                 isBusyWorking = false,
                 statusNoticeAr = "",
-                uiState = CommandsUiState.Error(userNotice),
+                uiState = CommandsUiState.Idle,
+                activeError = compactError,
+                isErrorDetailsExpanded = false,
                 modelConnectionStatus = ModelConnectionStatus.Disconnected(
                     category = classification.category,
                     exactError = classification.exactErrorMessage,
@@ -222,7 +318,7 @@ class CommandsViewModel(
                 )
             )
         }
-        speakIfEnabled("تعذر الاتصال بـ Gemini: ${classification.category.titleAr}")
+        speakIfEnabled(classification.category.titleAr)
     }
 
     private fun observeExecutionPauseState() {
@@ -287,14 +383,17 @@ class CommandsViewModel(
                 processRecordedAudio(bytes, mime)
             },
             onError = { err ->
-                viewModelScope.launch {
-                    chatHistoryRepository.addAgentMessage(err, ChatMessageType.ERROR)
-                }
                 _state.update {
                     it.copy(
                         isListening = false,
                         partialTranscript = "",
-                        uiState = CommandsUiState.Error(err)
+                        uiState = CommandsUiState.Idle,
+                        activeError = CompactErrorState(
+                            titleAr = "تعذر الاستماع الصوتي",
+                            summaryAr = err,
+                            technicalDetails = "",
+                            retryType = ErrorRetryType.VOICE
+                        )
                     )
                 }
             }
@@ -307,13 +406,16 @@ class CommandsViewModel(
                 processRecordedAudio(bytes, mime)
             },
             onError = { err ->
-                viewModelScope.launch {
-                    chatHistoryRepository.addAgentMessage(err, ChatMessageType.ERROR)
-                }
                 _state.update {
                     it.copy(
                         isListening = false,
-                        uiState = CommandsUiState.Error(err)
+                        uiState = CommandsUiState.Idle,
+                        activeError = CompactErrorState(
+                            titleAr = "تعذر إكمال التسجيل الصوتي",
+                            summaryAr = err,
+                            technicalDetails = "",
+                            retryType = ErrorRetryType.VOICE
+                        )
                     )
                 }
             }
@@ -322,6 +424,7 @@ class CommandsViewModel(
     }
 
     private fun processRecordedAudio(bytes: ByteArray, mimeType: String) {
+        lastRecordedAudio = bytes to mimeType
         activeTaskJob?.cancel()
         activeTaskJob = viewModelScope.launch {
             _state.update {
@@ -329,6 +432,8 @@ class CommandsViewModel(
                     isListening = false,
                     isBusyWorking = true,
                     uiState = CommandsUiState.Planning,
+                    activeError = null,
+                    isErrorDetailsExpanded = false,
                     statusNoticeAr = "جارٍ تحليل التسجيل الصوتي... ${AgentPromptRules.WAIT_THINKING_NOTICE_AR}",
                     executionTruthReportAr = null
                 )
@@ -336,11 +441,16 @@ class CommandsViewModel(
             try {
                 val installed = ensureInstalledAppsLoaded()
                 val appLabels = installed.map { it.label }
-                val (transcript, rawPlan) = geminiRepository.transcribeAndPlanAudio(
+                val audioMeta = geminiRepository.transcribeAndPlanAudioWithMeta(
                     audioBytes = bytes,
                     mimeType = mimeType,
-                    installedAppNames = appLabels
+                    installedAppNames = appLabels,
+                    onStatusUpdate = { statusMsg ->
+                        _state.update { it.copy(statusNoticeAr = statusMsg) }
+                    }
                 )
+                val (transcript, rawPlan) = audioMeta.value
+                recordModelRouteUsage(audioMeta, transcript)
                 if (transcript.isNotBlank()) {
                     chatHistoryRepository.addUserMessage(transcript)
                 }
@@ -353,23 +463,23 @@ class CommandsViewModel(
                         status = ActionStatus.CANCELLED,
                         actionType = "POLICY_REJECTED_AUDIO"
                     )
-                    chatHistoryRepository.addAgentMessage(commandPolicy.reasonAr, ChatMessageType.ERROR)
+                    chatHistoryRepository.addAgentMessage(commandPolicy.reasonAr, ChatMessageType.TEXT)
                     _state.update {
                         it.copy(
                             inputText = "",
                             isBusyWorking = false,
                             statusNoticeAr = "",
                             lastSpokenReply = commandPolicy.reasonAr,
-                            uiState = CommandsUiState.Error(commandPolicy.reasonAr)
+                            uiState = CommandsUiState.Idle
                         )
                     }
                     speakIfEnabled(commandPolicy.reasonAr)
                     return@launch
                 }
 
-                val route = ChatIntentRouter.classifyIntent(transcript)
+                val route = ChatIntentRouter.classifyIntent(transcript, appLabels)
                 if (route !is ChatRouteIntent.ExecuteCommandPlan) {
-                    handleNonPlanIntent(route, installed)
+                    handleNonPlanIntent(route, installed, transcript)
                     _state.update { it.copy(inputText = "", isBusyWorking = false, statusNoticeAr = "") }
                     return@launch
                 }
@@ -382,14 +492,14 @@ class CommandsViewModel(
                         status = ActionStatus.CANCELLED,
                         actionType = "POLICY_REJECTED_PLAN"
                     )
-                    chatHistoryRepository.addAgentMessage(planPolicy.reasonAr, ChatMessageType.ERROR)
+                    chatHistoryRepository.addAgentMessage(planPolicy.reasonAr, ChatMessageType.TEXT)
                     _state.update {
                         it.copy(
                             inputText = "",
                             isBusyWorking = false,
                             statusNoticeAr = "",
                             lastSpokenReply = planPolicy.reasonAr,
-                            uiState = CommandsUiState.Error(planPolicy.reasonAr)
+                            uiState = CommandsUiState.Idle
                         )
                     }
                     speakIfEnabled(planPolicy.reasonAr)
@@ -411,28 +521,47 @@ class CommandsViewModel(
                 }
                 speakIfEnabled(groundedPlan.spokenReplyAr)
             } catch (e: TimeoutCancellationException) {
-                val msg = "انتهت مهلة تحليل الصوت. يرجى المحاولة مرة أخرى."
-                chatHistoryRepository.addAgentMessage(msg, ChatMessageType.ERROR)
                 _state.update {
-                    it.copy(isBusyWorking = false, statusNoticeAr = "", uiState = CommandsUiState.Error(msg))
+                    it.copy(
+                        isBusyWorking = false,
+                        statusNoticeAr = "",
+                        uiState = CommandsUiState.Idle,
+                        activeError = CompactErrorState(
+                            titleAr = "انتهت مهلة تحليل الصوت",
+                            summaryAr = "استغرق تحليل الصوت وقتاً أطول من المعتاد. اضغط إعادة المحاولة.",
+                            technicalDetails = e.message ?: "TimeoutCancellationException",
+                            retryType = ErrorRetryType.VOICE
+                        )
+                    )
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                handleGeminiFailure("Audio planning", e)
+                handleGeminiFailure("Audio planning", e, retryType = ErrorRetryType.VOICE)
             }
         }
     }
 
-    fun analyzeAndPlanCommand(commandOverride: String? = null) {
+    fun analyzeAndPlanCommand(
+        commandOverride: String? = null,
+        addUserBubble: Boolean = true
+    ) {
         val command = (commandOverride ?: _state.value.inputText).trim()
         if (command.isEmpty()) {
             _state.update {
-                it.copy(uiState = CommandsUiState.Error("يرجى كتابة أمر أو التحدث أولاً."))
+                it.copy(
+                    activeError = CompactErrorState(
+                        titleAr = "أدخل أمراً أولاً",
+                        summaryAr = "اكتب رسالتك أو اضغط زر الميكروفون للتحدث.",
+                        technicalDetails = "",
+                        retryType = ErrorRetryType.CONNECTION_CHECK
+                    )
+                )
             }
             return
         }
 
+        lastSubmittedCommand = command
         activeTaskJob?.cancel()
         executionJob?.cancel()
         gameLoopJob?.cancel()
@@ -448,13 +577,17 @@ class CommandsViewModel(
                     isExecuting = false,
                     isGameplayRunning = false,
                     isBusyWorking = true,
+                    activeError = null,
+                    isErrorDetailsExpanded = false,
                     statusNoticeAr = "يفكر الوكيل ويتحقق من الشاشة الحقيقية... ${AgentPromptRules.WAIT_THINKING_NOTICE_AR}",
                     executionTruthReportAr = null
                 )
             }
 
             try {
-                chatHistoryRepository.addUserMessage(command)
+                if (addUserBubble) {
+                    chatHistoryRepository.addUserMessage(command)
+                }
                 val installed = ensureInstalledAppsLoaded(forceRefresh = true)
                 val appLabels = installed.map { it.label }
 
@@ -468,20 +601,20 @@ class CommandsViewModel(
                         status = ActionStatus.CANCELLED,
                         actionType = "POLICY_REJECTED"
                     )
-                    chatHistoryRepository.addAgentMessage(reason, ChatMessageType.ERROR)
+                    chatHistoryRepository.addAgentMessage(reason, ChatMessageType.TEXT)
                     _state.update {
                         it.copy(
                             isBusyWorking = false,
                             statusNoticeAr = "",
                             lastSpokenReply = reason,
-                            uiState = CommandsUiState.Error(reason)
+                            uiState = CommandsUiState.Idle
                         )
                     }
                     speakIfEnabled(reason)
                     return@launch
                 }
 
-                when (val route = ChatIntentRouter.classifyIntent(command)) {
+                when (val route = ChatIntentRouter.classifyIntent(command, appLabels)) {
                     is ChatRouteIntent.ExecuteCommandPlan -> {
                         val commandPolicy = agentPolicy.evaluateCommand(command, appLabels)
                         if (!commandPolicy.allowed) {
@@ -491,13 +624,13 @@ class CommandsViewModel(
                                 status = ActionStatus.CANCELLED,
                                 actionType = "POLICY_REJECTED"
                             )
-                            chatHistoryRepository.addAgentMessage(commandPolicy.reasonAr, ChatMessageType.ERROR)
+                            chatHistoryRepository.addAgentMessage(commandPolicy.reasonAr, ChatMessageType.TEXT)
                             _state.update {
                                 it.copy(
                                     isBusyWorking = false,
                                     statusNoticeAr = "",
                                     lastSpokenReply = commandPolicy.reasonAr,
-                                    uiState = CommandsUiState.Error(commandPolicy.reasonAr)
+                                    uiState = CommandsUiState.Idle
                                 )
                             }
                             speakIfEnabled(commandPolicy.reasonAr)
@@ -514,11 +647,16 @@ class CommandsViewModel(
                             ?.toCompactPromptText()
                             ?: "داخل تطبيق وكيل الهاتف (خدمة إمكانية الوصول غير مفعلة حالياً)"
 
-                        val rawPlan = geminiRepository.generateCommandPlan(
+                        val planMeta = geminiRepository.generateCommandPlanWithMeta(
                             userCommand = command,
                             installedAppNames = appLabels,
-                            currentScreenSummary = AgentPromptRules.enrichPlanScreenSummary(rawScreenSummary)
+                            currentScreenSummary = AgentPromptRules.enrichPlanScreenSummary(rawScreenSummary),
+                            onStatusUpdate = { statusMsg ->
+                                _state.update { it.copy(statusNoticeAr = statusMsg) }
+                            }
                         )
+                        recordModelRouteUsage(planMeta, command)
+                        val rawPlan = planMeta.value
 
                         val planPolicy = agentPolicy.validatePlan(rawPlan)
                         if (!planPolicy.allowed) {
@@ -528,13 +666,13 @@ class CommandsViewModel(
                                 status = ActionStatus.CANCELLED,
                                 actionType = "POLICY_REJECTED_PLAN"
                             )
-                            chatHistoryRepository.addAgentMessage(planPolicy.reasonAr, ChatMessageType.ERROR)
+                            chatHistoryRepository.addAgentMessage(planPolicy.reasonAr, ChatMessageType.TEXT)
                             _state.update {
                                 it.copy(
                                     isBusyWorking = false,
                                     statusNoticeAr = "",
                                     lastSpokenReply = planPolicy.reasonAr,
-                                    uiState = CommandsUiState.Error(planPolicy.reasonAr)
+                                    uiState = CommandsUiState.Idle
                                 )
                             }
                             speakIfEnabled(planPolicy.reasonAr)
@@ -559,38 +697,98 @@ class CommandsViewModel(
                     }
 
                     else -> {
-                        handleNonPlanIntent(route, installed)
+                        handleNonPlanIntent(route, installed, command)
                         _state.update { it.copy(isBusyWorking = false, statusNoticeAr = "") }
                     }
                 }
             } catch (e: TimeoutCancellationException) {
-                val msg = "انتهت مهلة الاتصال بالذكاء الاصطناعي (60 ثانية). حاول مجدداً."
-                chatHistoryRepository.addAgentMessage(msg, ChatMessageType.ERROR)
                 _state.update {
-                    it.copy(isBusyWorking = false, statusNoticeAr = "", uiState = CommandsUiState.Error(msg))
+                    it.copy(
+                        isBusyWorking = false,
+                        statusNoticeAr = "",
+                        uiState = CommandsUiState.Idle,
+                        activeError = CompactErrorState(
+                            titleAr = "انتهت مهلة الاتصال",
+                            summaryAr = "استغرقت الاستجابة وقتاً طويلاً (60 ثانية). أعد المحاولة الآن.",
+                            technicalDetails = e.message ?: "TimeoutCancellationException",
+                            retryCommand = command,
+                            retryType = ErrorRetryType.COMMAND
+                        )
+                    )
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                handleGeminiFailure("Chat command", e)
+                handleGeminiFailure(
+                    contextTag = "Chat command",
+                    e = e,
+                    retryType = ErrorRetryType.COMMAND,
+                    retryCommand = command
+                )
             }
         }
     }
 
     private suspend fun handleNonPlanIntent(
         route: ChatRouteIntent,
-        installedApps: List<InstalledAppInfo>
+        installedApps: List<InstalledAppInfo>,
+        rawCommand: String? = null
     ) {
         when (route) {
             is ChatRouteIntent.ShowApps -> handleShowApps(route, installedApps)
             ChatRouteIntent.ReadScreen -> handleReadScreen(installedApps)
+            ChatRouteIntent.ShowActionHistory -> handleShowActionHistory()
+            ChatRouteIntent.PromptReminderDetails -> handlePromptReminderDetails()
             is ChatRouteIntent.CreateTaskOrReminder -> handleCreateTaskOrReminder(route)
             ChatRouteIntent.ListTasksAndReminders -> handleListTasks()
             is ChatRouteIntent.CancelTaskOrReminder -> handleCancelTaskByQuery(route.queryText)
             is ChatRouteIntent.StartGameplay -> startGameplayGoal(route.goalText)
-            is ChatRouteIntent.ConversationalChat -> handleConversationalChat(route.message)
+            is ChatRouteIntent.ConversationalChat -> handleConversationalChat(route.message, rawCommand ?: route.message)
             is ChatRouteIntent.ExecuteCommandPlan -> Unit
         }
+    }
+
+    private suspend fun handleShowActionHistory() {
+        val recentLogs = actionLogRepository.allLogs.first().take(8)
+        if (recentLogs.isEmpty()) {
+            val reply = "لم أنفذ أي إجراءات مسجلة بعد. جرّب إعطائي أمراً مثل «اعرض ألعابي» أو «افتح الإعدادات»."
+            chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
+            _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
+            speakIfEnabled(reply)
+            return
+        }
+
+        val timeFmt = SimpleDateFormat("hh:mm a", Locale("ar"))
+        val summary = buildString {
+            appendLine("آخر ${recentLogs.size} إجراءات في سجل الوكيل:")
+            recentLogs.forEach { log ->
+                val status = ActionStatus.fromName(log.status)
+                val badge = when (status) {
+                    ActionStatus.SUCCESS -> "✅"
+                    ActionStatus.PENDING_APPROVAL -> "⏳"
+                    ActionStatus.CANCELLED -> "⏹"
+                    ActionStatus.FAILED -> "❌"
+                    ActionStatus.UNDONE -> "↩"
+                }
+                appendLine("$badge ${log.title} (${timeFmt.format(Date(log.timestamp))})")
+            }
+        }.trim()
+        chatHistoryRepository.addAgentMessage(summary, ChatMessageType.TEXT)
+        _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = summary) }
+        speakIfEnabled("عرضت لك آخر ${recentLogs.size} إجراءات قمت بها.")
+    }
+
+    private suspend fun handlePromptReminderDetails() {
+        val reply = "بماذا تريدني أن أذكّرك ومتى؟ مثال: «ذكّرني بعد 10 دقائق بشرب الماء» أو «اضبط منبهاً للساعة 7:30 صباحاً». جهّزت لك بداية العبارة في مربع الكتابة."
+        chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
+        _state.update {
+            it.copy(
+                uiState = CommandsUiState.Idle,
+                inputText = "ذكّرني بعد 10 دقائق بـ ",
+                lastSpokenReply = reply
+            )
+        }
+        speakIfEnabled("بماذا تريدني أن أذكّرك ومتى؟")
     }
 
     private suspend fun handleShowApps(
@@ -598,16 +796,17 @@ class CommandsViewModel(
         installedApps: List<InstalledAppInfo>
     ) {
         val visibleApps = installedApps.filter { !it.isHidden }
-        val filtered = visibleApps.filter { app ->
+        val allMatched = visibleApps.filter { app ->
             val folderOk = intent.folderFilter == null || app.folder == intent.folderFilter
             val searchOk = intent.searchQuery.isBlank() ||
                 app.label.contains(intent.searchQuery, ignoreCase = true)
             folderOk && searchOk
-        }.take(30)
+        }
+        val filtered = allMatched.take(40)
 
         if (filtered.isEmpty()) {
             val reply = if (intent.folderFilter != null) {
-                "لم أجد تطبيقات مصنّفة ضمن مجلد «${intent.folderFilter.titleAr}» حالياً. لست متأكداً إن كانت ألعابك مصنّفة في مجلد آخر — يمكنك تجربة «اعرض تطبيقاتي» أو استخدام التصنيف التلقائي في تبويب «التطبيقات»."
+                "لم أجد تطبيقات مصنّفة ضمن مجلد «${intent.folderFilter.titleAr}» حالياً. يمكنك تجربة «اعرض تطبيقاتي» أو استخدام التصنيف التلقائي في تبويب «التطبيقات»."
             } else {
                 "لم أجد تطبيقات مطابقة للعرض حالياً."
             }
@@ -628,7 +827,12 @@ class CommandsViewModel(
             )
         }
 
-        val reply = "${intent.titleAr} (${filtered.size}): اضغط على أي بطاقة لتشغيله فوراً."
+        val countNote = if (allMatched.size > filtered.size) {
+            " (عرض ${filtered.size} من أصل ${allMatched.size})"
+        } else {
+            " (${filtered.size})"
+        }
+        val reply = "${intent.titleAr}$countNote: اضغط على أي بطاقة لتشغيله فوراً."
         chatHistoryRepository.addAgentMessage(
             text = reply,
             type = ChatMessageType.APPS_LIST,
@@ -675,17 +879,22 @@ class CommandsViewModel(
         }.trim()
 
         val groundedReply = try {
-            val aiExplanation = geminiRepository.summarizeAppScreens(
+            val explainMeta = geminiRepository.summarizeAppScreensWithMeta(
                 appName = appLabel,
                 packageName = snapshot.packageName,
-                capturedScreenTexts = AgentPromptRules.enrichScreenReadLines(snapshot.toCompactPromptText())
+                capturedScreenTexts = AgentPromptRules.enrichScreenReadLines(snapshot.toCompactPromptText()),
+                onStatusUpdate = { statusMsg ->
+                    _state.update { it.copy(statusNoticeAr = statusMsg) }
+                }
             )
-            "$aiExplanation\n\n— العناصر المرصودة فعلياً في «$appLabel»:\n$factualElements"
+            recordModelRouteUsage(explainMeta, "قراءة شاشة $appLabel")
+            "${explainMeta.value}\n\n— العناصر المرصودة فعلياً في «$appLabel»:\n$factualElements"
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "Screen explanation fell back to factual elements", e)
-            "تعذر الاتصال بـ Gemini (${e.localizedMessage ?: "خطأ شبكة"})، وهذه العناصر الفعلية المرصودة في شاشتك الآن:\n$factualElements"
+            val reason = classifyModelError(e).category.titleAr
+            "تعذر التلخيص الذكي عبر Gemini ($reason)، وهذه العناصر الفعلية المرصودة في شاشتك الآن:\n$factualElements"
         }
 
         chatHistoryRepository.addAgentMessage(groundedReply, ChatMessageType.SCREEN_READ)
@@ -827,7 +1036,7 @@ class CommandsViewModel(
         speakIfEnabled(reply)
     }
 
-    private suspend fun handleConversationalChat(userMessage: String) {
+    private suspend fun handleConversationalChat(userMessage: String, retryCommand: String = userMessage) {
         val baseContext = buildString {
             append("تطبيقات محملة: ${cachedInstalledApps.size}. ")
             append(
@@ -836,18 +1045,49 @@ class CommandsViewModel(
             )
         }
         try {
-            val reply = geminiRepository.conversationalReply(
+            val appLabels = cachedInstalledApps.map { it.label }
+            val modelTier = ChatIntentRouter.classifyModelTier(userMessage, appLabels)
+            val meta = geminiRepository.conversationalReplyWithMeta(
                 userMessage = userMessage,
-                contextSummary = AgentPromptRules.enrichChatContextSummary(baseContext)
+                contextSummary = AgentPromptRules.enrichChatContextSummary(baseContext),
+                onStatusUpdate = { statusMsg ->
+                    _state.update { it.copy(statusNoticeAr = statusMsg) }
+                },
+                modelTier = modelTier
             )
-            chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
-            _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
-            speakIfEnabled(reply)
+            recordModelRouteUsage(meta, userMessage)
+            chatHistoryRepository.addAgentMessage(meta.value, ChatMessageType.TEXT)
+            _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = meta.value) }
+            speakIfEnabled(meta.value)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            handleGeminiFailure("Conversational chat", e)
+            handleGeminiFailure(
+                contextTag = "Conversational chat",
+                e = e,
+                retryType = ErrorRetryType.COMMAND,
+                retryCommand = retryCommand
+            )
         }
+    }
+
+    private suspend fun recordModelRouteUsage(
+        meta: ModelResponseMetadata<*>,
+        requestPreview: String
+    ) {
+        val fallbackNote = if (meta.usedFallback) " (تحويل احتياطي من ${meta.intendedModel})" else ""
+        val traceText = "آخر استجابة: ${meta.modelUsed} • ${meta.tier.labelAr}$fallbackNote"
+        Log.i(
+            TAG,
+            "ModelTrace: tier=${meta.tier.name}, intended=${meta.intendedModel}, actual=${meta.modelUsed}, fallback=${meta.usedFallback}"
+        )
+        _state.update { it.copy(lastModelTraceAr = traceText) }
+        actionLogRepository.logAction(
+            title = "تبديل النموذج: ${meta.modelUsed}",
+            details = "${meta.tier.labelAr}$fallbackNote | الطلب: ${requestPreview.take(60)}",
+            status = ActionStatus.SUCCESS,
+            actionType = "MODEL_ROUTE_${meta.tier.name}"
+        )
     }
 
     fun openPlayFeatureDialog() {
@@ -859,7 +1099,8 @@ class CommandsViewModel(
     }
 
     fun startGameplayGoal(goal: String = "العب اللعبة أو التطبيق الظاهر على الشاشة كالإنسان خطوة بخطوة") {
-        _state.update { it.copy(showPlayFeatureDialog = false) }
+        lastGameplayGoal = goal
+        _state.update { it.copy(showPlayFeatureDialog = false, activeError = null) }
         startGameplayLoop(goal)
     }
 
@@ -898,10 +1139,11 @@ class CommandsViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.e(TAG, "Gameplay loop failed", e)
-                val errMsg = e.localizedMessage ?: "توقف محرك اللعب بسبب خطأ غير متوقع."
-                chatHistoryRepository.addAgentMessage(errMsg, ChatMessageType.ERROR)
-                _state.update { it.copy(uiState = CommandsUiState.Error(errMsg)) }
+                handleGeminiFailure(
+                    contextTag = "Gameplay loop",
+                    e = e,
+                    retryType = ErrorRetryType.GAMEPLAY
+                )
             } finally {
                 executionController.reset()
                 _state.update {
@@ -912,13 +1154,12 @@ class CommandsViewModel(
     }
 
     fun launchAppFromChat(packageName: String, label: String) {
-        val launchIntent = appContext.packageManager.getLaunchIntentForPackage(packageName)
-            ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+        val launchIntent = AppOrganizer.createLaunchIntent(appContext, packageName)
 
         if (launchIntent == null) {
             viewModelScope.launch {
                 val msg = "تعذر تشغيل «$label» مباشرة من الجهاز."
-                chatHistoryRepository.addAgentMessage(msg, ChatMessageType.ERROR)
+                chatHistoryRepository.addAgentMessage(msg, ChatMessageType.TEXT)
             }
             return
         }
@@ -939,7 +1180,7 @@ class CommandsViewModel(
             viewModelScope.launch {
                 chatHistoryRepository.addAgentMessage(
                     "تعذر فتح «$label»: ${err.localizedMessage}",
-                    ChatMessageType.ERROR
+                    ChatMessageType.TEXT
                 )
             }
         }
@@ -1165,10 +1406,12 @@ class CommandsViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.e(TAG, "Step execution error", e)
-                val msg = e.localizedMessage ?: "حدث خطأ أثناء التنفيذ."
-                chatHistoryRepository.addAgentMessage(msg, ChatMessageType.ERROR)
-                _state.update { it.copy(uiState = CommandsUiState.Error(msg)) }
+                handleGeminiFailure(
+                    contextTag = "Step execution",
+                    e = e,
+                    retryType = ErrorRetryType.COMMAND,
+                    retryCommand = lastSubmittedCommand
+                )
             } finally {
                 executionController.reset()
                 floatingControlManager.dismiss()
@@ -1335,13 +1578,16 @@ class CommandsViewModel(
 
     fun reportMicPermissionDenied() {
         val msg = "إذن الميكروفون غير مفعل. يمكنك تفعيله من تبويب «الأذونات» أو كتابة أمرك نصياً."
-        viewModelScope.launch {
-            chatHistoryRepository.addAgentMessage(msg, ChatMessageType.ERROR)
-        }
         _state.update {
             it.copy(
                 isListening = false,
-                uiState = CommandsUiState.Error(msg)
+                uiState = CommandsUiState.Idle,
+                activeError = CompactErrorState(
+                    titleAr = "إذن الميكروفون مطلوب",
+                    summaryAr = msg,
+                    technicalDetails = "",
+                    retryType = ErrorRetryType.VOICE
+                )
             )
         }
     }

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
+import com.example.executor.ModelRouteTier
 import com.example.security.APP_CHECK_PREFS_NAME
 import com.example.security.APP_CHECK_STORE_NAME
 import com.example.security.AppCheckTokenClient
@@ -16,6 +17,7 @@ import com.example.security.classifyModelError
 import com.example.security.clearStoredAppCheckTokens
 import com.example.security.getEffectiveDebugSecret
 import com.example.security.isAppCheckTokenError
+import com.example.security.isModelOverloadError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -396,6 +398,196 @@ class AppCheckRecoveryTest {
         val modelErr = classifyModelError(RuntimeException("RESOURCE_EXHAUSTED: quota exceeded"))
         assertEquals(DisconnectionCategory.MODEL_ERROR, modelErr.category)
         assertTrue(modelErr.explanationAr.contains("نموذج"))
+
+        val busyErr = classifyModelError(
+            RuntimeException("503 UNAVAILABLE: This model is currently experiencing high demand. Please try again later.")
+        )
+        assertEquals(DisconnectionCategory.MODEL_BUSY, busyErr.category)
+        assertTrue(busyErr.explanationAr.contains("503"))
+        assertTrue(isModelOverloadError(RuntimeException("This model is currently experiencing high demand")))
+        assertFalse(isModelOverloadError(RuntimeException("Firebase App Check token is invalid")))
+    }
+
+    @Test
+    fun `retries 503 overload with exponential backoff and status notice then succeeds on primary model`() = runBlocking {
+        val events = mutableListOf<String>()
+        val statusNotices = mutableListOf<String>()
+        var primaryCalls = 0
+
+        val fakeAppCheck = object : AppCheckTokenClient {
+            override suspend fun getToken(forceRefresh: Boolean): String = "valid-token"
+            override suspend fun clearStoredTokens() {}
+        }
+
+        val fakeModelClient = object : GeminiModelClient {
+            override suspend fun generatePlanJson(prompt: String) = ""
+            override suspend fun generateAudioPlanJson(audioBytes: ByteArray, mimeType: String, prompt: String) = ""
+            override suspend fun generateVerificationJson(prompt: String) = "{}"
+            override suspend fun generateCategorizationJson(prompt: String) = "{}"
+            override suspend fun generateGeneralArabicText(prompt: String): String {
+                primaryCalls++
+                events.add("primary($primaryCalls)")
+                if (primaryCalls <= 2) {
+                    throw RuntimeException("503 UNAVAILABLE: This model is currently experiencing high demand. Please try again later.")
+                }
+                return "أهلاً بك! أنا جاهز لمساعدتك."
+            }
+        }
+
+        val repository = GeminiRepository(
+            appCheckClient = fakeAppCheck,
+            modelClient = fakeModelClient,
+            overloadRetryDelaysMs = listOf(100L, 200L, 400L),
+            delayFn = { ms -> events.add("delay($ms)") }
+        )
+
+        val reply = repository.conversationalReply(
+            userMessage = "مرحبا",
+            contextSummary = "سياق",
+            onStatusUpdate = { msg -> statusNotices.add(msg) }
+        )
+
+        assertEquals("أهلاً بك! أنا جاهز لمساعدتك.", reply)
+        assertEquals(3, primaryCalls)
+        assertEquals(listOf(MSG_MODEL_BUSY_RETRYING_AR, MSG_MODEL_BUSY_RETRYING_AR), statusNotices)
+        assertEquals(
+            listOf("primary(1)", "delay(100)", "primary(2)", "delay(200)", "primary(3)"),
+            events
+        )
+    }
+
+    @Test
+    fun `falls back to lighter gemini-3-5-flash-lite model when primary 503 retries are exhausted`() = runBlocking {
+        val events = mutableListOf<String>()
+        var primaryCalls = 0
+        var fallbackCalls = 0
+
+        val fakeAppCheck = object : AppCheckTokenClient {
+            override suspend fun getToken(forceRefresh: Boolean): String = "valid-token"
+            override suspend fun clearStoredTokens() {}
+        }
+
+        val fakeModelClient = object : GeminiModelClient {
+            override suspend fun generatePlanJson(prompt: String) = ""
+            override suspend fun generateAudioPlanJson(audioBytes: ByteArray, mimeType: String, prompt: String) = ""
+            override suspend fun generateVerificationJson(prompt: String) = "{}"
+            override suspend fun generateCategorizationJson(prompt: String) = "{}"
+            override suspend fun generateGeneralArabicText(prompt: String): String {
+                primaryCalls++
+                events.add("primary($primaryCalls)")
+                throw RuntimeException("503 overloaded: high demand")
+            }
+
+            override suspend fun pingModelTest(): String {
+                primaryCalls++
+                events.add("primaryPing($primaryCalls)")
+                throw RuntimeException("503 overloaded: high demand")
+            }
+
+            override suspend fun pingModelTestFallback(): String {
+                fallbackCalls++
+                events.add("fallbackPing($fallbackCalls)")
+                return "متصل"
+            }
+        }
+
+        val repository = GeminiRepository(
+            appCheckClient = fakeAppCheck,
+            modelClient = fakeModelClient,
+            overloadRetryDelaysMs = listOf(50L, 100L, 200L),
+            delayFn = { ms -> events.add("delay($ms)") }
+        )
+
+        val (ok, details) = repository.pingModelTest()
+
+        assertTrue(ok)
+        assertTrue(details.contains(FALLBACK_LITE_GEMINI_MODEL))
+        assertEquals(4, primaryCalls)
+        assertEquals(1, fallbackCalls)
+        assertEquals(
+            listOf(
+                "primaryPing(1)",
+                "delay(50)",
+                "primaryPing(2)",
+                "delay(100)",
+                "primaryPing(3)",
+                "delay(200)",
+                "primaryPing(4)",
+                "fallbackPing(1)"
+            ),
+            events
+        )
+    }
+
+    @Test
+    fun `routes general chat to Lite model and phone or gameplay tasks to Flash with bidirectional fallback`() = runBlocking {
+        val fakeAppCheck = object : AppCheckTokenClient {
+            override suspend fun getToken(forceRefresh: Boolean): String = "valid-token"
+            override suspend fun clearStoredTokens() {}
+        }
+
+        val calls = mutableListOf<String>()
+        var failLiteUnavailable = false
+
+        val fakeModelClient = object : GeminiModelClient {
+            override suspend fun generatePlanJson(prompt: String) = ""
+            override suspend fun generateAudioPlanJson(audioBytes: ByteArray, mimeType: String, prompt: String) = ""
+            override suspend fun generateVerificationJson(prompt: String) = "{}"
+            override suspend fun generateCategorizationJson(prompt: String) = "{}"
+            override suspend fun generateGeneralArabicText(prompt: String): String {
+                calls.add("flash")
+                return "رد من Flash"
+            }
+
+            override suspend fun generateLiteGeneralArabicText(prompt: String): String {
+                calls.add("lite")
+                if (failLiteUnavailable) {
+                    throw RuntimeException("404 NOT_FOUND: model not found")
+                }
+                return "رد من Lite"
+            }
+        }
+
+        val repository = GeminiRepository(
+            appCheckClient = fakeAppCheck,
+            modelClient = fakeModelClient,
+            overloadRetryDelaysMs = listOf(10L),
+            delayFn = {}
+        )
+
+        // 1. General discussion uses Lite (gemini-3.5-flash-lite)
+        val liteMeta = repository.conversationalReplyWithMeta(
+            userMessage = "ما هي عاصمة فرنسا؟",
+            contextSummary = "عام",
+            modelTier = ModelRouteTier.LITE
+        )
+        assertEquals(ModelRouteTier.LITE, liteMeta.tier)
+        assertEquals(FALLBACK_LITE_GEMINI_MODEL, liteMeta.modelUsed)
+        assertFalse(liteMeta.usedFallback)
+        assertEquals("رد من Lite", liteMeta.value)
+
+        // 2. Gameplay / phone usage uses Flash (gemini-3.8-flash)
+        val flashMeta = repository.conversationalReplyWithMeta(
+            userMessage = "تولّي اللعب",
+            contextSummary = "لعب",
+            modelTier = ModelRouteTier.FLASH
+        )
+        assertEquals(ModelRouteTier.FLASH, flashMeta.tier)
+        assertEquals(PRIMARY_GEMINI_MODEL, flashMeta.modelUsed)
+        assertFalse(flashMeta.usedFallback)
+        assertEquals("رد من Flash", flashMeta.value)
+
+        // 3. If Lite model is unavailable (404), safely falls back to Flash immediately
+        failLiteUnavailable = true
+        val recoveredFromLiteMeta = repository.conversationalReplyWithMeta(
+            userMessage = "اشرح لي نظرية النسبية",
+            contextSummary = "عام",
+            modelTier = ModelRouteTier.LITE
+        )
+        assertEquals(PRIMARY_GEMINI_MODEL, recoveredFromLiteMeta.modelUsed)
+        assertTrue(recoveredFromLiteMeta.usedFallback)
+        assertEquals("رد من Flash", recoveredFromLiteMeta.value)
+        assertEquals(listOf("lite", "flash", "lite", "flash"), calls)
     }
 
     private class InMemorySharedPreferences : SharedPreferences {

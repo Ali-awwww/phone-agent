@@ -137,17 +137,20 @@ fun ChatMessageBubble(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(vertical = 2.dp)
             .testTag(if (isUser) "chat_bubble_user_${message.id}" else "chat_bubble_agent_${message.id}"),
         horizontalArrangement = if (isUser) Arrangement.Start else Arrangement.End
     ) {
         Surface(
-            modifier = Modifier.widthIn(max = 320.dp),
+            modifier = Modifier
+                .widthIn(max = 320.dp)
+                .clip(bubbleShape),
             shape = bubbleShape,
             color = containerColor,
             border = BorderStroke(1.dp, borderColor)
         ) {
             Column(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 if (!isUser) {
@@ -180,6 +183,8 @@ fun ChatMessageBubble(
                             },
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             color = when (msgType) {
                                 ChatMessageType.ERROR -> StatusCancelled
                                 ChatMessageType.STOPPED -> StatusPending
@@ -192,7 +197,8 @@ fun ChatMessageBubble(
                 Text(
                     text = message.text,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = CyberTextPrimary
+                    color = CyberTextPrimary,
+                    softWrap = true
                 )
 
                 if (!isUser && msgType == ChatMessageType.APPS_LIST && !message.payloadJson.isNullOrBlank()) {

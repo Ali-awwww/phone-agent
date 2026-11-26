@@ -30,19 +30,18 @@ class AgentPolicyTest {
     }
 
     @Test
-    fun `rejects general off-phone questions with polite Arabic apology and suggestions`() {
+    fun `allows general off-phone questions discussions and advice after removing phone-only scope restriction`() {
         val generalQuestions = listOf(
             "ما هي عاصمة فرنسا؟",
             "اكتب لي قصيدة جميلة عن البحر",
             "ما هو ناتج 45 ضرب 12؟",
-            "اشرح لي نظرية النسبية"
+            "اشرح لي نظرية النسبية",
+            "بماذا تنصحني لتنظيم وقتي في الدراسة؟"
         )
 
         for (question in generalQuestions) {
             val decision = policy.evaluateCommand(question)
-            assertFalse("Expected off-scope question to be rejected: $question", decision.allowed)
-            assertTrue(decision.reasonAr.contains("عذراً"))
-            assertTrue(decision.reasonAr.contains("تنظيم التطبيقات"))
+            assertTrue("Expected general question/discussion to be allowed: $question -> ${decision.reasonAr}", decision.allowed)
         }
     }
 

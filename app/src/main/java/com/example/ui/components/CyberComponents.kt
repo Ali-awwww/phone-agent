@@ -173,13 +173,13 @@ fun AgentSafetyWarningBanner(
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .padding(horizontal = 12.dp, vertical = 4.dp),
         shape = MaterialTheme.shapes.small,
         color = StatusPendingContainer,
         border = BorderStroke(1.dp, StatusPending.copy(alpha = 0.75f))
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -187,13 +187,15 @@ fun AgentSafetyWarningBanner(
                 imageVector = Icons.Rounded.WarningAmber,
                 contentDescription = "تنبيه أمان",
                 tint = StatusPending,
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(18.dp)
             )
             Text(
                 text = "تنبيه: الوكيل قد يخطئ أحياناً، راجع الأفعال الحساسة قبل الموافقة عليها",
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.SemiBold,
-                color = StatusPending
+                color = StatusPending,
+                maxLines = 2,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
             )
         }
     }
