@@ -119,7 +119,7 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
         val rect = Rect()
 
         fun traverse(node: AccessibilityNodeInfo?, depth: Int) {
-            if (node == null || depth > 25) return
+            if (node == null || depth > 14 || elementBounds.size >= 80) return
             if (node.isPassword) {
                 hasSensitiveField = true
             }
@@ -155,7 +155,7 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
             }
 
             val labelForBound = text.ifEmpty { desc }
-            if (!node.isPassword && (labelForBound.isNotEmpty() || node.isClickable) && elementBounds.size < 40) {
+            if (!node.isPassword && (labelForBound.isNotEmpty() || node.isClickable) && elementBounds.size < 80) {
                 node.getBoundsInScreen(rect)
                 if (rect.width() > 0 && rect.height() > 0) {
                     val cx = (rect.exactCenterX() / screenW).coerceIn(0.02f, 0.98f)

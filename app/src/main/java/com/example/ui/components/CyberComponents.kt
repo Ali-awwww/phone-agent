@@ -327,6 +327,7 @@ fun PlayWithAgentPromoCard(
  */
 @Composable
 fun FloatingPillShowcaseCard(
+    statusText: String = "الوكيل جاهز",
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -358,7 +359,7 @@ fun FloatingPillShowcaseCard(
             }
 
             Text(
-                text = "يفكر في الحركة التالية…",
+                text = statusText,
                 style = MaterialTheme.typography.bodySmall,
                 color = Color.White,
                 maxLines = 1,
@@ -556,7 +557,7 @@ fun PlayFeatureInfoDialog(
                     tint = CyberElectricCyan
                 )
                 Text(
-                    text = "العب مع الوكيل — iOS v1.0.9",
+                    text = "العب مع الوكيل — iOS v1.0.10",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
                 )

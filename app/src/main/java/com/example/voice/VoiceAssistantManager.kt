@@ -56,12 +56,15 @@ class VoiceAssistantManager(
         return SpeechRecognizer.isRecognitionAvailable(context)
     }
 
+    private var activeOnError: ((String) -> Unit)? = null
+
     fun startListening(
         onPartialResult: (String) -> Unit,
         onFinalTranscript: (String) -> Unit,
         onAudioRecordedFallback: (ByteArray, String) -> Unit,
         onError: (String) -> Unit
     ) {
+        activeOnError = onError
         stopSpeaking()
         if (isSpeechRecognitionAvailable()) {
             startSpeechRecognizer(onPartialResult, onFinalTranscript, onError)
@@ -81,12 +84,23 @@ class VoiceAssistantManager(
         }
     }
 
+    private val voiceTimeoutHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val voiceTimeoutRunnable = Runnable {
+        runCatching {
+            stopListening({ _, _ -> }, { _ -> })
+            activeOnError?.invoke("لم أسمع شيئًا.")
+        }
+    }
+
     private fun startSpeechRecognizer(
         onPartialResult: (String) -> Unit,
         onFinalTranscript: (String) -> Unit,
         onError: (String) -> Unit
     ) {
         try {
+            voiceTimeoutHandler.removeCallbacks(voiceTimeoutRunnable)
+            voiceTimeoutHandler.postDelayed(voiceTimeoutRunnable, 25_000L)
+
             speechRecognizer?.destroy()
             val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
             speechRecognizer = recognizer
@@ -99,6 +113,7 @@ class VoiceAssistantManager(
                 override fun onEndOfSpeech() {}
 
                 override fun onError(error: Int) {
+                    voiceTimeoutHandler.removeCallbacks(voiceTimeoutRunnable)
                     val message = when (error) {
                         SpeechRecognizer.ERROR_NO_MATCH -> "لم أتمكن من سماع كلمات واضحة، حاول التحدث مرة أخرى."
                         SpeechRecognizer.ERROR_AUDIO -> "مشكلة في التقاط الصوت من الميكروفون."
@@ -110,6 +125,7 @@ class VoiceAssistantManager(
                 }
 
                 override fun onResults(results: Bundle?) {
+                    voiceTimeoutHandler.removeCallbacks(voiceTimeoutRunnable)
                     val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         ?.firstOrNull().orEmpty()
                     if (text.isNotBlank()) {
@@ -138,6 +154,7 @@ class VoiceAssistantManager(
             }
             recognizer.startListening(intent)
         } catch (e: Exception) {
+            voiceTimeoutHandler.removeCallbacks(voiceTimeoutRunnable)
             Log.e(TAG, "SpeechRecognizer error", e)
             onError("تعذر تشغيل التعرف الصوتي: ${e.localizedMessage}")
         }

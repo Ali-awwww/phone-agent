@@ -59,7 +59,7 @@ class GeneralGameEngine(
 ) {
 
     @Volatile
-    private var currentOverlayStatusAr: String = "يفكر في الحركة التالية"
+    private var currentOverlayStatusAr: String = "الوكيل جاهز"
 
     suspend fun resolveForegroundPackage(service: PhoneAgentAccessibilityService): String {
         val fromAccessibility = withContext(Dispatchers.Main) {
@@ -114,13 +114,29 @@ class GeneralGameEngine(
             )
 
         executionController.reset()
-        currentOverlayStatusAr = "يفكر في الحركة التالية"
+        currentOverlayStatusAr = "مراقبة الشاشة..."
         syncFloatingOverlayForCurrentForeground(service, callbacks)
 
+        var consecutiveEmpty = 0
         val visibilityWatcherJob = launch {
             while (isActive) {
                 runCatching {
-                    syncFloatingOverlayForCurrentForeground(service, callbacks)
+                    val foregroundPkg = resolveForegroundPackage(service)
+                    val isExternal = ForegroundAppPolicy.shouldShowFloatingOverlay(foregroundPkg, context.packageName)
+                    if (isExternal) {
+                        consecutiveEmpty = 0
+                        floatingControlManager.show(
+                            initialStatusAr = currentOverlayStatusAr,
+                            isPaused = executionController.isPaused.value,
+                            callbacks = callbacks
+                        )
+                        floatingControlManager.setHostVisible(true)
+                    } else {
+                        consecutiveEmpty++
+                        if (consecutiveEmpty >= 3 && !floatingControlManager.isMiniChatOpen()) {
+                            floatingControlManager.setHostVisible(false)
+                        }
+                    }
                 }
                 delay(300L)
             }
@@ -141,7 +157,7 @@ class GeneralGameEngine(
                     continue
                 }
 
-                currentOverlayStatusAr = "يفكر في الحركة التالية"
+                currentOverlayStatusAr = "مراقبة الشاشة والدورات..."
                 floatingControlManager.updateStatus(
                     statusAr = currentOverlayStatusAr,
                     isPaused = executionController.isPaused.value

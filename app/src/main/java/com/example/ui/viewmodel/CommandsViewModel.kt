@@ -41,6 +41,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -1423,12 +1424,14 @@ class CommandsViewModel(
             }
             val succeededList = mutableListOf<String>()
             val failedList = mutableListOf<String>()
+            var consecutiveEmpty = 0
             val overlayWatcherJob = launch {
                 while (isActive) {
                     val service = ScreenStateBridge.getService()
                     if (service != null) {
                         val fgPkg = generalGameEngine.resolveForegroundPackage(service)
                         if (ForegroundAppPolicy.shouldShowFloatingOverlay(fgPkg, appContext.packageName)) {
+                            consecutiveEmpty = 0
                             floatingControlManager.show(
                                 initialStatusAr = _state.value.statusNoticeAr.ifBlank { "ينفّذ خطوات الخطة" },
                                 isPaused = executionController.isPaused.value,
@@ -1436,10 +1439,15 @@ class CommandsViewModel(
                             )
                             floatingControlManager.setHostVisible(true)
                         } else {
-                            floatingControlManager.setHostVisible(false)
+                            consecutiveEmpty++
+                            if (consecutiveEmpty >= 3 && !floatingControlManager.isMiniChatOpen()) {
+                                floatingControlManager.setHostVisible(false)
+                            }
                         }
                     } else {
-                        floatingControlManager.setHostVisible(false)
+                        if (!floatingControlManager.isMiniChatOpen()) {
+                            floatingControlManager.setHostVisible(false)
+                        }
                     }
                     delay(350L)
                 }
@@ -1513,13 +1521,17 @@ class CommandsViewModel(
                                 pendingApprovalLogId = pendingLogId
                             )
                         }
+                        val approvalNotice = "بانتظار موافقتك: ${step.titleAr}"
+                        _state.update { it.copy(statusNoticeAr = approvalNotice) }
                         floatingControlManager.updateStatus(
-                            "بانتظار موافقتك على: ${step.titleAr}",
+                            approvalNotice,
                             executionController.isPaused.value
                         )
                         speakIfEnabled("إجراء حساس: ${step.titleAr}. راجع الخطة كاملة ثم وافق أو ألغِ.")
 
-                        val approved = deferred.await()
+                        val approved = withTimeoutOrNull(120_000L) {
+                            deferred.await()
+                        } ?: false
                         approvalDeferred = null
                         _state.update {
                             it.copy(
@@ -1621,7 +1633,9 @@ class CommandsViewModel(
             } finally {
                 overlayWatcherJob.cancel()
                 executionController.reset()
-                floatingControlManager.dismiss()
+                if (!floatingControlManager.isMiniChatOpen()) {
+                    floatingControlManager.dismiss()
+                }
                 _state.update {
                     it.copy(
                         isExecuting = false,
@@ -1713,6 +1727,13 @@ class CommandsViewModel(
         voiceManager.stopSpeaking()
 
         activeTaskJob = viewModelScope.launch {
+            floatingControlManager.show(
+                initialStatusAr = "ينفّذ توجيه شريط الدردشة المصغّر…",
+                isPaused = false,
+                callbacks = buildFloatingControlCallbacks()
+            )
+            floatingControlManager.showMiniChat()
+
             _state.update {
                 it.copy(
                     isBusyWorking = true,

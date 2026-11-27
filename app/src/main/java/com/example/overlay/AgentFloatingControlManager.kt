@@ -221,9 +221,7 @@ class AgentFloatingControlManager(private val context: Context) {
                     orientation = LinearLayout.VERTICAL
                     layoutDirection = View.LAYOUT_DIRECTION_RTL
                     onOutsideTouch = {
-                        if (currentMode == FloatingOverlayMode.MINI_CHAT) {
-                            switchModeInternal(FloatingOverlayMode.PILL)
-                        }
+                        // لا تطوِ اللوحة عند لمس التطبيق الخارجي في وضع MINI_CHAT
                     }
                 }
 
@@ -271,7 +269,7 @@ class AgentFloatingControlManager(private val context: Context) {
                     wm = wm,
                     snapToHorizontalEdge = false
                 ) {
-                    switchModeInternal(FloatingOverlayMode.BUBBLE)
+                    switchModeInternal(FloatingOverlayMode.MINI_CHAT)
                 }
 
                 attachDragAndTapListener(
@@ -655,6 +653,14 @@ class AgentFloatingControlManager(private val context: Context) {
             )
             inputRow.addView(sendBtn, LinearLayout.LayoutParams(dp(38), dp(38)))
             addView(inputRow)
+        }
+    }
+
+    fun isMiniChatOpen(): Boolean = currentMode == FloatingOverlayMode.MINI_CHAT
+
+    suspend fun showMiniChat() {
+        withContext(Dispatchers.Main) {
+            switchModeInternal(FloatingOverlayMode.MINI_CHAT)
         }
     }
 
