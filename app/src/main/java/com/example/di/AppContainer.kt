@@ -10,10 +10,15 @@ import com.example.policy.AgentPolicy
 import com.example.security.FirebaseAppCheckClient
 import com.example.verifier.ScreenVerifier
 import com.example.voice.VoiceAssistantManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
     private val database by lazy { PhoneAgentDatabase.getInstance(appContext) }
+    private val initScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val agentPolicy by lazy {
         AgentPolicy()
@@ -57,5 +62,11 @@ class AppContainer(context: Context) {
 
     val voiceAssistantManager by lazy {
         VoiceAssistantManager(appContext)
+    }
+
+    init {
+        initScope.launch {
+            runCatching { appOrganizer.seedInitialOrganizationsOnce() }
+        }
     }
 }

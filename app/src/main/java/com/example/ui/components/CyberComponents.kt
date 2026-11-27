@@ -556,7 +556,7 @@ fun PlayFeatureInfoDialog(
                     tint = CyberElectricCyan
                 )
                 Text(
-                    text = "العب مع الوكيل — iOS v1.0.8",
+                    text = "العب مع الوكيل — iOS v1.0.9",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
                 )

@@ -73,21 +73,27 @@ class AppsViewModel(
 
     private fun observeApps() {
         viewModelScope.launch {
-            appOrganizer.organizationsFlow.collectLatest { orgList ->
-                val map = orgList.associateBy { it.packageName }
-                try {
-                    val apps = appOrganizer.loadInstalledApps(map)
+            try {
+                appOrganizer.installedAppsFlow.collectLatest { apps ->
                     _state.update { it.copy(allApps = apps, isLoading = false) }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to load installed apps", e)
-                    _state.update {
-                        it.copy(
-                            isLoading = false,
-                            statusMessage = "تعذر تحميل قائمة التطبيقات: ${e.localizedMessage}"
-                        )
-                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to load installed apps", e)
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        statusMessage = "تعذر تحميل قائمة التطبيقات: ${e.localizedMessage}"
+                    )
                 }
             }
+        }
+    }
+
+    fun refreshInstalledApps() {
+        viewModelScope.launch {
+            runCatching { appOrganizer.refreshInstalledPackagesCache() }
         }
     }
 

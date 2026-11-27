@@ -162,6 +162,17 @@ class GeneralGameEngine(
                     continue
                 }
 
+                if (observation.isNearEmptyTree()) {
+                    val emptyMsg = "لا أرى أزرار اللعبة — صف لي مكان الزر"
+                    actionLogRepository.logAction(
+                        title = "تعذّر رصد أزرار اللعبة",
+                        details = emptyMsg,
+                        status = ActionStatus.FAILED,
+                        actionType = "GAME_NEAR_EMPTY_TREE"
+                    )
+                    return@coroutineScope GameLoopResult(false, executedCount, emptyMsg)
+                }
+
                 if (observation.snapshot.hasSensitiveSecurityField) {
                     val safeMsg = "تم إيقاف محرك اللعب فوراً لحمايتك بعد رصد شاشة حساسة (كلمة مرور/دفع/بصمة)."
                     actionLogRepository.logAction(
@@ -221,8 +232,8 @@ class GeneralGameEngine(
                     isPaused = executionController.isPaused.value
                 )
 
-                val gestureOk = executeGameDecision(service, decision)
-                executedCount++
+                val gestureOk = executeGameDecision(service, decision, observation)
+                if (gestureOk) executedCount++
                 val stepDesc = buildString {
                     append("خطوة $cycle (${decision.action.name}): ")
                     append(decision.reasonAr.ifBlank { decision.targetText.ifBlank { "تنفيذ إيماءة على الشاشة" } })
@@ -251,9 +262,39 @@ class GeneralGameEngine(
         }
     }
 
+    internal fun resolveObservedCoordinatesForTap(
+        observation: GameScreenObservation?,
+        targetText: String,
+        requestedX: Float,
+        requestedY: Float
+    ): Pair<Float, Float>? {
+        val elements = observation?.elements ?: return null
+        if (elements.isEmpty()) return null
+
+        val cleanQuery = targetText.trim()
+        if (cleanQuery.isNotEmpty()) {
+            val matchedByText = elements.firstOrNull { el ->
+                el.label.isNotBlank() &&
+                    el.label != "عنصر تفاعلي" &&
+                    (el.label.contains(cleanQuery, ignoreCase = true) ||
+                        cleanQuery.contains(el.label, ignoreCase = true))
+            }
+            if (matchedByText != null) {
+                return matchedByText.centerXRatio to matchedByText.centerYRatio
+            }
+        }
+
+        val matchedByCoords = elements.firstOrNull { el ->
+            kotlin.math.abs(el.centerXRatio - requestedX) <= 0.08f &&
+                kotlin.math.abs(el.centerYRatio - requestedY) <= 0.08f
+        } ?: return null
+        return matchedByCoords.centerXRatio to matchedByCoords.centerYRatio
+    }
+
     suspend fun executeMiniChatDirectiveAction(
         service: PhoneAgentAccessibilityService,
-        directive: GeminiRepository.MiniChatDirectiveResult
+        directive: GeminiRepository.MiniChatDirectiveResult,
+        observation: GameScreenObservation? = null
     ): Boolean {
         if (!directive.shouldAct) return false
         return when (directive.action) {
@@ -261,9 +302,27 @@ class GeneralGameEngine(
                 val clicked = withContext(Dispatchers.Main) {
                     directive.targetText.isNotBlank() && service.findAndClickHumanLike(directive.targetText)
                 }
-                if (clicked) true else service.performTapAt(directive.x, directive.y)
+                if (clicked) {
+                    true
+                } else {
+                    val observedCoords = resolveObservedCoordinatesForTap(
+                        observation = observation,
+                        targetText = directive.targetText,
+                        requestedX = directive.x,
+                        requestedY = directive.y
+                    ) ?: return false
+                    service.performTapAt(observedCoords.first, observedCoords.second)
+                }
             }
-            "TAP_XY" -> service.performTapAt(directive.x, directive.y)
+            "TAP_XY" -> {
+                val observedCoords = resolveObservedCoordinatesForTap(
+                    observation = observation,
+                    targetText = directive.targetText,
+                    requestedX = directive.x,
+                    requestedY = directive.y
+                ) ?: return false
+                service.performTapAt(observedCoords.first, observedCoords.second)
+            }
             "SWIPE" -> service.performSwipe(directive.x, directive.y, directive.endX, directive.endY)
             "SCROLL" -> withContext(Dispatchers.Main) {
                 service.scrollForward()
@@ -304,16 +363,35 @@ class GeneralGameEngine(
 
     private suspend fun executeGameDecision(
         service: PhoneAgentAccessibilityService,
-        decision: GameActionDecision
+        decision: GameActionDecision,
+        observation: GameScreenObservation? = null
     ): Boolean {
         return when (decision.action) {
             GameGestureAction.TAP_TEXT -> {
                 val clicked = withContext(Dispatchers.Main) {
                     decision.targetText.isNotBlank() && service.findAndClickHumanLike(decision.targetText)
                 }
-                if (clicked) true else service.performTapAt(decision.x, decision.y)
+                if (clicked) {
+                    true
+                } else {
+                    val observedCoords = resolveObservedCoordinatesForTap(
+                        observation = observation,
+                        targetText = decision.targetText,
+                        requestedX = decision.x,
+                        requestedY = decision.y
+                    ) ?: return false
+                    service.performTapAt(observedCoords.first, observedCoords.second)
+                }
             }
-            GameGestureAction.TAP_XY -> service.performTapAt(decision.x, decision.y)
+            GameGestureAction.TAP_XY -> {
+                val observedCoords = resolveObservedCoordinatesForTap(
+                    observation = observation,
+                    targetText = decision.targetText,
+                    requestedX = decision.x,
+                    requestedY = decision.y
+                ) ?: return false
+                service.performTapAt(observedCoords.first, observedCoords.second)
+            }
             GameGestureAction.SWIPE -> service.performSwipe(decision.x, decision.y, decision.endX, decision.endY)
             GameGestureAction.SCROLL -> withContext(Dispatchers.Main) {
                 service.scrollForward()

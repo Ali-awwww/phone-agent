@@ -977,6 +977,11 @@ class GeminiRepository internal constructor(
             appendLine("أنت تتحكم حالياً في الشاشة التالية عبر شريط الدردشة المصغّر:")
             appendLine(screenSummary.ifBlank { "لا توجد تفاصيل شاشة حالياً." })
             appendLine()
+            appendLine("قواعد إلزامية:")
+            appendLine("1) لا تطلب من المستخدم أبداً أن يضغط أي زر بنفسه ولا تعطه تعليمات يدوية؛ إما أن تنفّذ الإجراء بنفسك (TAP_TEXT أو TAP_XY أو SWIPE أو SCROLL أو INPUT_TEXT أو BACK) أو تُرجع shouldAct=false و action=\"NONE\" وتذكر بوضوح أنك لا ترى الزر على الشاشة.")
+            appendLine("2) استخدم إحداثيات x و y فقط من «مواقع العناصر المرصودة» الموجودة في ملخص الشاشة أعلاه، ولا تخمّن إحداثيات غير مرصودة أبداً.")
+            appendLine("3) إذا كانت الشاشة شبه فارغة بلا أزرار واضحة، أرجع shouldAct=false و action=\"NONE\" و replyOneLineAr=\"لا أرى أزرار اللعبة — صف لي مكان الزر\".")
+            appendLine()
             appendLine("توجيه المستخدم الفوري: $userCommand")
             appendLine("هل كان وضع اللعب التلقائي يعمل؟ $wasGameplayRunning")
             appendLine("أجب بصيغة JSON فقط بدون شرح خارجي:")
@@ -984,7 +989,7 @@ class GeminiRepository internal constructor(
         }
 
         val chain = getModelChainForTier(ModelRouteTier.FLASH)
-        val result = withModelChainResilience(
+        var result = withModelChainResilience(
             timeoutMs = 30_000L,
             candidates = listOf(
                 ModelCallCandidate(chain[0]) { modelClient.generateGeneralArabicText(prompt) },
@@ -992,9 +997,25 @@ class GeminiRepository internal constructor(
                 ModelCallCandidate(chain[2]) { modelClient.generateGeneralArabicTextThird(prompt) }
             )
         )
-        val parsed = parseMiniChatDirectiveJson(result.value)
+        var parsed = tryParseMiniChatDirectiveJson(result.value)
+        if (parsed == null) {
+            val strictJsonPrompt = buildString {
+                appendLine("أعد الإجابة بصيغة JSON فقط بدون أي كلمة أو علامة خارج كائن { ... }:")
+                appendLine(prompt)
+            }
+            result = withModelChainResilience(
+                timeoutMs = 25_000L,
+                candidates = listOf(
+                    ModelCallCandidate(chain[0]) { modelClient.generateGeneralArabicText(strictJsonPrompt) },
+                    ModelCallCandidate(chain[1]) { modelClient.generateLiteGeneralArabicText(strictJsonPrompt) },
+                    ModelCallCandidate(chain[2]) { modelClient.generateGeneralArabicTextThird(strictJsonPrompt) }
+                )
+            )
+            parsed = tryParseMiniChatDirectiveJson(result.value)
+        }
+        val finalDirective = parsed ?: nonJsonFallbackDirective()
         return ModelResponseMetadata(
-            value = parsed,
+            value = finalDirective,
             tier = ModelRouteTier.FLASH,
             intendedModel = chain[0],
             modelUsed = result.modelUsed,
@@ -1002,7 +1023,7 @@ class GeminiRepository internal constructor(
         )
     }
 
-    internal fun parseMiniChatDirectiveJson(raw: String): MiniChatDirectiveResult {
+    internal fun tryParseMiniChatDirectiveJson(raw: String): MiniChatDirectiveResult? {
         val cleaned = raw.trim()
             .removePrefix("```json")
             .removePrefix("```")
@@ -1016,9 +1037,11 @@ class GeminiRepository internal constructor(
                 val reply = obj.optString("replyOneLineAr", "").trim()
                     .replace('\n', ' ')
                     .take(120)
+                val shouldAct = obj.optBoolean("shouldAct", false)
+                val action = obj.optString("action", "NONE").uppercase()
                 return MiniChatDirectiveResult(
-                    shouldAct = obj.optBoolean("shouldAct", false),
-                    action = obj.optString("action", "NONE").uppercase(),
+                    shouldAct = shouldAct,
+                    action = action,
                     targetText = obj.optString("text", ""),
                     inputText = obj.optString("inputText", ""),
                     x = obj.optDouble("x", 0.5).toFloat().coerceIn(0.02f, 0.98f),
@@ -1026,11 +1049,20 @@ class GeminiRepository internal constructor(
                     endX = obj.optDouble("endX", 0.5).toFloat().coerceIn(0.02f, 0.98f),
                     endY = obj.optDouble("endY", 0.2).toFloat().coerceIn(0.02f, 0.98f),
                     continuePlaying = obj.optBoolean("continuePlaying", false),
-                    replyOneLineAr = reply.ifBlank { "تم استلام توجيهك وتنفيذه على الشاشة." }
+                    replyOneLineAr = reply.ifBlank {
+                        if (shouldAct) "تم تنفيذ توجيهك على الشاشة." else "لم أستطع تنفيذ الضغط"
+                    }
                 )
             }
         }
-        val singleLine = cleaned.replace('\n', ' ').trim().take(120)
+        return null
+    }
+
+    internal fun parseMiniChatDirectiveJson(raw: String): MiniChatDirectiveResult {
+        return tryParseMiniChatDirectiveJson(raw) ?: nonJsonFallbackDirective()
+    }
+
+    private fun nonJsonFallbackDirective(): MiniChatDirectiveResult {
         return MiniChatDirectiveResult(
             shouldAct = false,
             action = "NONE",
@@ -1041,7 +1073,7 @@ class GeminiRepository internal constructor(
             endX = 0.5f,
             endY = 0.2f,
             continuePlaying = false,
-            replyOneLineAr = singleLine.ifBlank { "تم تنفيذ طلبك." }
+            replyOneLineAr = "لم أستطع تنفيذ الضغط"
         )
     }
 

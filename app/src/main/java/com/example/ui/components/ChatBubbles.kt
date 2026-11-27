@@ -1,6 +1,5 @@
 package com.example.ui.components
 
-import android.graphics.drawable.Drawable
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -63,18 +62,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.core.graphics.drawable.toBitmap
 import com.example.data.local.AgentTaskEntity
 import com.example.data.local.AgentTaskType
 import com.example.data.local.ChatMessageEntity
 import com.example.data.local.ChatMessageType
 import com.example.data.local.ChatSender
+import com.example.organizer.AppOrganizer
 import com.example.organizer.InstalledAppInfo
 import com.example.ui.theme.CyberBgDeep
 import com.example.ui.theme.CyberBorderGlow
@@ -597,12 +596,10 @@ fun ChatMessageBubble(
 @Composable
 private fun ChatAppLauncherCard(
     item: ChatAppCardItem,
-    icon: Drawable?,
+    icon: ImageBitmap?,
     onClick: () -> Unit
 ) {
-    val bitmap = remember(icon) {
-        runCatching { icon?.toBitmap(72, 72)?.asImageBitmap() }.getOrNull()
-    }
+    val bitmap = icon ?: AppOrganizer.getCachedIcon(item.packageName)
     Surface(
         modifier = Modifier
             .fillMaxWidth()

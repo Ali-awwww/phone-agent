@@ -15,6 +15,12 @@ object ScreenStateBridge {
 
     private var serviceRef: WeakReference<PhoneAgentAccessibilityService>? = null
 
+    @Volatile
+    private var taskActive: Boolean = false
+
+    @Volatile
+    private var screenReadActive: Boolean = false
+
     fun attachService(service: PhoneAgentAccessibilityService) {
         serviceRef = WeakReference(service)
         _isServiceConnected.value = true
@@ -25,6 +31,16 @@ object ScreenStateBridge {
         serviceRef = null
         _isServiceConnected.value = false
     }
+
+    fun setTaskActive(active: Boolean) {
+        taskActive = active
+    }
+
+    fun setScreenReadActive(active: Boolean) {
+        screenReadActive = active
+    }
+
+    fun isOperationActive(): Boolean = taskActive || screenReadActive
 
     fun updateSnapshot(snapshot: ScreenSnapshot) {
         _latestSnapshot.value = snapshot

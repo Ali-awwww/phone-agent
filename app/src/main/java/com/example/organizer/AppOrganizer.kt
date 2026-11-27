@@ -5,8 +5,11 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.drawable.Drawable
 import android.os.Build
+import android.util.LruCache
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.core.graphics.drawable.toBitmap
 import com.example.data.ai.GeminiRepository
 import com.example.data.local.ActionLogRepository
 import com.example.data.local.ActionStatus
@@ -17,18 +20,32 @@ import com.example.service.ScreenStateBridge
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 data class InstalledAppInfo(
     val packageName: String,
     val label: String,
-    val icon: Drawable?,
+    val icon: ImageBitmap?,
     val folder: AppFolder,
     val isHidden: Boolean,
     val lastUsedMs: Long,
     val isUnused: Boolean,
     val lastSummary: String?
+)
+
+private data class CachedAppPackage(
+    val packageName: String,
+    val label: String,
+    val heuristicFolder: AppFolder,
+    val lastUsedMs: Long,
+    val isUnused: Boolean
 )
 
 class AppOrganizer(
@@ -38,6 +55,10 @@ class AppOrganizer(
     private val geminiRepository: GeminiRepository
 ) {
     companion object {
+        private val iconCache = LruCache<String, ImageBitmap>(256)
+
+        fun getCachedIcon(packageName: String): ImageBitmap? = iconCache.get(packageName)
+
         fun createLaunchIntent(context: Context, packageName: String): Intent? {
             val pm = context.packageManager
             pm.getLaunchIntentForPackage(packageName)?.let { intent ->
@@ -63,12 +84,77 @@ class AppOrganizer(
         }
     }
 
+    private val packageCacheMutex = Mutex()
+    private val cachedPackagesFlow = MutableStateFlow<List<CachedAppPackage>?>(null)
+
+    @Volatile
+    private var seededOnce: Boolean = false
+
     val organizationsFlow: Flow<List<AppOrganizationEntity>> =
         appOrganizationDao.observeAllOrganizations()
 
+    /**
+     * يُستعلم عن PackageManager وتُفكّ الأيقونات مرة واحدة في الخلفية، ثم عند أي تغيير في قاعدة البيانات
+     * يُعاد ربط المجلد/الإخفاء/الملخص في الذاكرة فقط دون إعادة الاستعلام أو فك تشفير الأيقونات.
+     */
+    val installedAppsFlow: Flow<List<InstalledAppInfo>> = combine(
+        flow {
+            ensurePackagesQueried(forceRefresh = false)
+            cachedPackagesFlow.collect { list ->
+                if (list != null) emit(list)
+            }
+        },
+        organizationsFlow
+    ) { rawPackages, orgList ->
+        val savedOrganizations = orgList.associateBy { it.packageName }
+        mapPackagesWithOrganizations(rawPackages, savedOrganizations)
+    }
+
+    suspend fun seedInitialOrganizationsOnce() = withContext(Dispatchers.IO) {
+        if (seededOnce) return@withContext
+        val rawPackages = ensurePackagesQueried(forceRefresh = false)
+        val savedOrganizations = organizationsFlow.first().associateBy { it.packageName }
+        val missing = rawPackages.filter { !savedOrganizations.containsKey(it.packageName) }
+        if (missing.isNotEmpty()) {
+            appOrganizationDao.upsertAll(
+                missing.map {
+                    AppOrganizationEntity(
+                        packageName = it.packageName,
+                        folderKey = it.heuristicFolder.name,
+                        isHidden = false
+                    )
+                }
+            )
+        }
+        seededOnce = true
+    }
+
+    suspend fun refreshInstalledPackagesCache(): List<InstalledAppInfo> {
+        val rawPackages = ensurePackagesQueried(forceRefresh = true)
+        val savedOrganizations = organizationsFlow.first().associateBy { it.packageName }
+        return mapPackagesWithOrganizations(rawPackages, savedOrganizations)
+    }
+
     suspend fun loadInstalledApps(
-        savedOrganizations: Map<String, AppOrganizationEntity>
-    ): List<InstalledAppInfo> = withContext(Dispatchers.IO) {
+        savedOrganizations: Map<String, AppOrganizationEntity>,
+        forceRefresh: Boolean = false
+    ): List<InstalledAppInfo> {
+        val rawPackages = ensurePackagesQueried(forceRefresh = forceRefresh)
+        return mapPackagesWithOrganizations(rawPackages, savedOrganizations)
+    }
+
+    private suspend fun ensurePackagesQueried(forceRefresh: Boolean): List<CachedAppPackage> =
+        withContext(Dispatchers.IO) {
+            cachedPackagesFlow.value?.takeIf { !forceRefresh }?.let { return@withContext it }
+            packageCacheMutex.withLock {
+                cachedPackagesFlow.value?.takeIf { !forceRefresh }?.let { return@withLock it }
+                val queried = queryPackagesAndDecodeIconsLocked(forceRefreshIcons = forceRefresh)
+                cachedPackagesFlow.value = queried
+                queried
+            }
+        }
+
+    private fun queryPackagesAndDecodeIconsLocked(forceRefreshIcons: Boolean): List<CachedAppPackage> {
         val pm = context.packageManager
         val mainIntent = Intent(Intent.ACTION_MAIN).apply {
             addCategory(Intent.CATEGORY_LAUNCHER)
@@ -88,52 +174,60 @@ class AppOrganizer(
         val thirtyDaysAgo = System.currentTimeMillis() - 30L * 24L * 60L * 60L * 1000L
 
         val seenPackages = HashSet<String>()
-        val result = mutableListOf<InstalledAppInfo>()
+        val result = mutableListOf<CachedAppPackage>()
 
         for (info in resolveInfos) {
             val pkg = info.activityInfo?.packageName ?: continue
             if (pkg == context.packageName || !seenPackages.add(pkg)) continue
 
             val label = info.loadLabel(pm)?.toString()?.trim().orEmpty().ifEmpty { pkg }
-            val icon = runCatching { info.loadIcon(pm) }.getOrNull()
-            val saved = savedOrganizations[pkg]
-            val folder = if (saved != null) {
-                AppFolder.fromKey(saved.folderKey)
-            } else {
-                guessFolderHeuristic(pkg, label)
+            if (forceRefreshIcons || iconCache.get(pkg) == null) {
+                val decoded = runCatching {
+                    info.loadIcon(pm)?.toBitmap(96, 96)?.asImageBitmap()
+                }.getOrNull()
+                if (decoded != null) {
+                    iconCache.put(pkg, decoded)
+                }
             }
+
             val lastUsed = usageMap[pkg] ?: 0L
             val isUnused = usageMap.isNotEmpty() && lastUsed < thirtyDaysAgo
-
             result.add(
-                InstalledAppInfo(
+                CachedAppPackage(
                     packageName = pkg,
                     label = label,
-                    icon = icon,
-                    folder = folder,
-                    isHidden = saved?.isHidden ?: false,
+                    heuristicFolder = guessFolderHeuristic(pkg, label),
                     lastUsedMs = lastUsed,
-                    isUnused = isUnused,
-                    lastSummary = saved?.lastSummary
+                    isUnused = isUnused
                 )
             )
         }
 
-        // حفظ التصنيفات الأولية محلياً لأول مرة
-        val missing = result.filter { !savedOrganizations.containsKey(it.packageName) }
-        if (missing.isNotEmpty()) {
-            appOrganizationDao.upsertAll(
-                missing.map {
-                    AppOrganizationEntity(
-                        packageName = it.packageName,
-                        folderKey = it.folder.name,
-                        isHidden = false
-                    )
-                }
+        return result.sortedBy { it.label }
+    }
+
+    private fun mapPackagesWithOrganizations(
+        rawPackages: List<CachedAppPackage>,
+        savedOrganizations: Map<String, AppOrganizationEntity>
+    ): List<InstalledAppInfo> {
+        return rawPackages.map { raw ->
+            val saved = savedOrganizations[raw.packageName]
+            val folder = if (saved != null) {
+                AppFolder.fromKey(saved.folderKey)
+            } else {
+                raw.heuristicFolder
+            }
+            InstalledAppInfo(
+                packageName = raw.packageName,
+                label = raw.label,
+                icon = iconCache.get(raw.packageName),
+                folder = folder,
+                isHidden = saved?.isHidden ?: false,
+                lastUsedMs = raw.lastUsedMs,
+                isUnused = raw.isUnused,
+                lastSummary = saved?.lastSummary
             )
         }
-
-        result.sortedBy { it.label }
     }
 
     suspend fun autoCategorizeWithGemini(apps: List<InstalledAppInfo>) {
@@ -236,62 +330,67 @@ class AppOrganizer(
             return notice
         }
 
-        onProgress?.invoke("جارٍ فتح التطبيق…")
-        val launchIntent = createLaunchIntent(context, app.packageName)
-            ?: throw IllegalStateException("لا يمكن فتح التطبيق «${app.label}».")
+        ScreenStateBridge.setScreenReadActive(true)
+        try {
+            onProgress?.invoke("جارٍ فتح التطبيق…")
+            val launchIntent = createLaunchIntent(context, app.packageName)
+                ?: throw IllegalStateException("لا يمكن فتح التطبيق «${app.label}».")
 
-        context.startActivity(launchIntent)
-        delay(1500L)
+            context.startActivity(launchIntent)
+            delay(1500L)
 
-        onProgress?.invoke("جارٍ قراءة الشاشة…")
-        val capturedScreens = mutableListOf<String>()
-        service.captureCurrentScreen()?.let { snap ->
-            if (!snap.hasSensitiveSecurityField) {
-                capturedScreens.add(snap.toCompactPromptText())
-            }
-        }
-        if (service.scrollForward()) {
-            delay(1000L)
+            onProgress?.invoke("جارٍ قراءة الشاشة…")
+            val capturedScreens = mutableListOf<String>()
             service.captureCurrentScreen()?.let { snap ->
                 if (!snap.hasSensitiveSecurityField) {
                     capturedScreens.add(snap.toCompactPromptText())
                 }
             }
-        }
-
-        if (capturedScreens.isEmpty()) {
-            val truthfulNotice = "تم فتح تطبيق «${app.label}» بنجاح، لكن خدمة إمكانية الوصول لم تلتقط نصوصاً على شاشته."
-            return truthfulNotice
-        }
-
-        onProgress?.invoke("جارٍ سؤال النموذج…")
-        val summary = geminiRepository.summarizeAppScreens(
-            appName = app.label,
-            packageName = app.packageName,
-            capturedScreenTexts = capturedScreens,
-            onStatusUpdate = { status ->
-                onProgress?.invoke("جارٍ كتابة الملخص… ($status)")
+            if (service.scrollForward()) {
+                delay(1000L)
+                service.captureCurrentScreen()?.let { snap ->
+                    if (!snap.hasSensitiveSecurityField) {
+                        capturedScreens.add(snap.toCompactPromptText())
+                    }
+                }
             }
-        )
 
-        onProgress?.invoke("جارٍ كتابة الملخص…")
-        val existing = appOrganizationDao.getOrganization(app.packageName)
-        appOrganizationDao.upsertOrganization(
-            AppOrganizationEntity(
+            if (capturedScreens.isEmpty()) {
+                val truthfulNotice = "تم فتح تطبيق «${app.label}» بنجاح، لكن خدمة إمكانية الوصول لم تلتقط نصوصاً على شاشته."
+                return truthfulNotice
+            }
+
+            onProgress?.invoke("جارٍ سؤال النموذج…")
+            val summary = geminiRepository.summarizeAppScreens(
+                appName = app.label,
                 packageName = app.packageName,
-                folderKey = existing?.folderKey ?: app.folder.name,
-                isHidden = existing?.isHidden ?: app.isHidden,
-                lastSummary = summary
+                capturedScreenTexts = capturedScreens,
+                onStatusUpdate = { status ->
+                    onProgress?.invoke("جارٍ كتابة الملخص… ($status)")
+                }
             )
-        )
 
-        actionLogRepository.logAction(
-            title = "تجربة وتلخيص «${app.label}»",
-            details = summary.take(180),
-            status = ActionStatus.SUCCESS,
-            actionType = "SUMMARIZE_APP"
-        )
-        return summary
+            onProgress?.invoke("جارٍ كتابة الملخص…")
+            val existing = appOrganizationDao.getOrganization(app.packageName)
+            appOrganizationDao.upsertOrganization(
+                AppOrganizationEntity(
+                    packageName = app.packageName,
+                    folderKey = existing?.folderKey ?: app.folder.name,
+                    isHidden = existing?.isHidden ?: app.isHidden,
+                    lastSummary = summary
+                )
+            )
+
+            actionLogRepository.logAction(
+                title = "تجربة وتلخيص «${app.label}»",
+                details = summary.take(180),
+                status = ActionStatus.SUCCESS,
+                actionType = "SUMMARIZE_APP"
+            )
+            return summary
+        } finally {
+            ScreenStateBridge.setScreenReadActive(false)
+        }
     }
 
     private fun queryRecentUsageMap(): Map<String, Long> {

@@ -176,12 +176,17 @@ fun CommandsScreen(
     ) == PackageManager.PERMISSION_GRANTED
 
     LaunchedEffect(displayMessages.size, plan != null, showInChatExecutionBubble) {
+        val layoutInfo = listState.layoutInfo
+        val currentTotal = layoutInfo.totalItemsCount
+        val lastVisibleIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+        val isNearBottom = currentTotal == 0 || lastVisibleIndex >= currentTotal - 3
+
         val headerCount = if (displayMessages.isEmpty()) 2 else 1
         val totalItems = headerCount +
             displayMessages.size +
             (if (plan != null) 1 else 0) +
             (if (showInChatExecutionBubble) 1 else 0)
-        if (totalItems > 0) {
+        if (totalItems > 0 && isNearBottom) {
             listState.animateScrollToItem(totalItems - 1)
         }
     }

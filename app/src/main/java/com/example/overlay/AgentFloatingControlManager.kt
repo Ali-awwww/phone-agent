@@ -158,7 +158,9 @@ class AgentFloatingControlManager(private val context: Context) {
     private var miniPauseBtn: ImageButton? = null
     private var miniStopBtn: ImageButton? = null
     private var miniHandBtn: ImageButton? = null
+    private var miniCloseBtn: ImageButton? = null
     private var miniReplyBubble: TextView? = null
+    private var miniRetryBtn: TextView? = null
     private var miniInputEditText: EditText? = null
     private var miniMicBtn: ImageButton? = null
     private var miniSendBtn: ImageButton? = null
@@ -260,10 +262,6 @@ class AgentFloatingControlManager(private val context: Context) {
                     gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                     x = 0
                     y = getBottomNavClearancePx()
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        flags = flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
-                        blurBehindRadius = dp(24)
-                    }
                 }
                 layoutParams = params
 
@@ -505,20 +503,33 @@ class AgentFloatingControlManager(private val context: Context) {
             ) { callbacks.onTakeOverByUser() }
             miniHandBtn = mHand
 
+            val mClose = createCircularIconButton(
+                sizeDp = 30,
+                bgColor = Color.parseColor("#48484A"),
+                iconRes = R.drawable.ic_pill_close,
+                contentDesc = "إغلاق شريط الدردشة"
+            ) {
+                switchModeInternal(FloatingOverlayMode.PILL)
+            }
+            miniCloseBtn = mClose
+
             topControlRow.addView(mPause, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(6) })
             topControlRow.addView(mStop, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(6) })
-            topControlRow.addView(mHand, LinearLayout.LayoutParams(dp(30), dp(30)))
+            topControlRow.addView(mHand, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(6) })
+            topControlRow.addView(mClose, LinearLayout.LayoutParams(dp(30), dp(30)))
             addView(topControlRow)
 
-            // الصف العلوي: رد الوكيل في فقاعة داكنة صغيرة محاذاة لليمين
-            val replyContainer = FrameLayout(context).apply {
+            // الصف العلوي: رد الوكيل في فقاعة داكنة صغيرة محاذاة لليمين + زر إعادة المحاولة عند الفشل
+            val replyContainer = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
                 layoutDirection = View.LAYOUT_DIRECTION_RTL
+                gravity = Gravity.START
             }
             val replyTv = TextView(context).apply {
                 text = "أكتب أو تحدّث لأوجّه الوكيل فوراً على هذه الشاشة"
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                maxLines = 2
+                maxLines = 3
                 ellipsize = TextUtils.TruncateAt.END
                 setPadding(dp(12), dp(7), dp(12), dp(7))
                 background = GradientDrawable().apply {
@@ -529,12 +540,35 @@ class AgentFloatingControlManager(private val context: Context) {
             miniReplyBubble = replyTv
             replyContainer.addView(
                 replyTv,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    Gravity.START
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
                 )
             )
+
+            val retryTv = TextView(context).apply {
+                text = "إعادة المحاولة"
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setPadding(dp(12), dp(5), dp(12), dp(5))
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#007AFF"))
+                    cornerRadius = dp(12).toFloat()
+                }
+                visibility = View.GONE
+            }
+            miniRetryBtn = retryTv
+            replyContainer.addView(
+                retryTv,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = dp(6)
+                }
+            )
+
             addView(
                 replyContainer,
                 LinearLayout.LayoutParams(
@@ -666,14 +700,24 @@ class AgentFloatingControlManager(private val context: Context) {
         }
     }
 
-    suspend fun showMiniChatReplyAndFold(replyOneLine: String, delayBeforeFoldMs: Long = 1600L) {
+    suspend fun showMiniChatReply(
+        replyOneLine: String,
+        onRetry: (() -> Unit)? = null
+    ) {
         withContext(Dispatchers.Main) {
             miniReplyBubble?.text = replyOneLine
-        }
-        delay(delayBeforeFoldMs)
-        withContext(Dispatchers.Main) {
-            if (currentMode == FloatingOverlayMode.MINI_CHAT) {
-                switchModeInternal(FloatingOverlayMode.PILL)
+            val retryBtn = miniRetryBtn
+            if (retryBtn != null) {
+                if (onRetry != null) {
+                    retryBtn.visibility = View.VISIBLE
+                    retryBtn.setOnClickListener {
+                        retryBtn.visibility = View.GONE
+                        onRetry()
+                    }
+                } else {
+                    retryBtn.visibility = View.GONE
+                    retryBtn.setOnClickListener(null)
+                }
             }
         }
     }
@@ -717,7 +761,9 @@ class AgentFloatingControlManager(private val context: Context) {
                 miniPauseBtn = null
                 miniStopBtn = null
                 miniHandBtn = null
+                miniCloseBtn = null
                 miniReplyBubble = null
+                miniRetryBtn = null
                 miniInputEditText = null
                 miniMicBtn = null
                 miniSendBtn = null
@@ -789,19 +835,11 @@ class AgentFloatingControlManager(private val context: Context) {
                 or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
                 or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN)
             params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                params.flags = params.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
-                params.blurBehindRadius = dp(24)
-            }
             runCatching { wm.updateViewLayout(root, params) }
             miniInputEditText?.requestFocus()
         } else {
             miniInputEditText?.let { hideKeyboard(it) }
             params.flags = baseNonFocusableFlags()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                params.flags = params.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
-                params.blurBehindRadius = dp(24)
-            }
             if (target == FloatingOverlayMode.PILL) {
                 params.x = 0
                 params.y = getBottomNavClearancePx()

@@ -1,6 +1,5 @@
 package com.example.ui.screens
 
-import android.graphics.drawable.Drawable
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -56,19 +55,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.permissions.AgentPermissionType
 import com.example.permissions.PermissionHelper
 import com.example.model.AppFolder
+import com.example.organizer.AppOrganizer
 import com.example.organizer.InstalledAppInfo
 import com.example.ui.components.CyberPanelCard
 import com.example.ui.components.MarkdownText
@@ -326,10 +325,11 @@ fun AppsScreen(
                         )
                     }
                     items(state.filteredApps, key = { it.packageName }) { app ->
-                        AppItemCard(
-                            app = app,
-                            onOpen = { viewModel.openApp(context, app) },
-                            onTryAndSummarize = {
+                        val onOpenApp = remember(app, viewModel, context) {
+                            { viewModel.openApp(context, app) }
+                        }
+                        val onTrySummarize = remember(app, viewModel, context) {
+                            {
                                 if (!PermissionHelper.isAccessibilityEnabled(context)) {
                                     viewModel.setSummarizeBlockedReason(SummarizeBlockedReason.ACCESSIBILITY)
                                 } else if (!PermissionHelper.isOverlayPermissionGranted(context)) {
@@ -337,9 +337,20 @@ fun AppsScreen(
                                 } else {
                                     viewModel.tryAndSummarizeApp(app)
                                 }
-                            },
-                            onMoveClick = { moveDialogApp = app },
-                            onToggleHide = { viewModel.toggleHideApp(app) }
+                            }
+                        }
+                        val onMoveApp = remember(app) {
+                            { moveDialogApp = app }
+                        }
+                        val onToggleHideApp = remember(app, viewModel) {
+                            { viewModel.toggleHideApp(app) }
+                        }
+                        AppItemCard(
+                            app = app,
+                            onOpen = onOpenApp,
+                            onTryAndSummarize = onTrySummarize,
+                            onMoveClick = onMoveApp,
+                            onToggleHide = onToggleHideApp
                         )
                     }
                 }
@@ -536,7 +547,11 @@ private fun AppItemCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                AppDrawableIcon(icon = app.icon, label = app.label)
+                AppDrawableIcon(
+                    packageName = app.packageName,
+                    icon = app.icon,
+                    label = app.label
+                )
 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
@@ -697,14 +712,12 @@ private fun AppItemCard(
 }
 
 @Composable
-private fun AppDrawableIcon(icon: Drawable?, label: String) {
-    val bitmap = remember(icon) {
-        runCatching { icon?.toBitmap(96, 96)?.asImageBitmap() }.getOrNull()
-    }
+private fun AppDrawableIcon(packageName: String, icon: ImageBitmap?, label: String) {
+    val cachedBitmap = icon ?: AppOrganizer.getCachedIcon(packageName)
     val squircle = androidx.compose.foundation.shape.RoundedCornerShape(14.dp)
-    if (bitmap != null) {
+    if (cachedBitmap != null) {
         Image(
-            bitmap = bitmap,
+            bitmap = cachedBitmap,
             contentDescription = "أيقونة $label",
             modifier = Modifier
                 .size(50.dp)

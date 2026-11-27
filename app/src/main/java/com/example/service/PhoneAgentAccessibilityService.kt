@@ -6,6 +6,7 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.model.ScreenSnapshot
@@ -23,6 +24,13 @@ data class GameScreenObservation(
     val snapshot: ScreenSnapshot,
     val elements: List<GameElementBound>
 ) {
+    fun isNearEmptyTree(): Boolean {
+        val meaningfulElements = elements.count { it.label.isNotBlank() && it.label != "عنصر تفاعلي" }
+        return snapshot.visibleTexts.isEmpty() &&
+            snapshot.clickableLabels.isEmpty() &&
+            meaningfulElements == 0
+    }
+
     fun toPromptSummary(): String {
         return buildString {
             append(snapshot.toCompactPromptText())
@@ -47,13 +55,32 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
         "passcode", "fingerprint", "biometric", "payment", "checkout", "cvv"
     )
 
+    private var lastEventCaptureMs: Long = 0L
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         ScreenStateBridge.attachService(this)
-        captureCurrentScreen()?.let { ScreenStateBridge.updateSnapshot(it) }
+        if (ScreenStateBridge.isOperationActive()) {
+            captureCurrentScreen()?.let { ScreenStateBridge.updateSnapshot(it) }
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        val eventType = event?.eventType ?: return
+        if (eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
+            eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
+            eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        ) {
+            return
+        }
+        if (!ScreenStateBridge.isOperationActive()) {
+            return
+        }
+        val nowMs = SystemClock.elapsedRealtime()
+        if (nowMs - lastEventCaptureMs < 2_000L) {
+            return
+        }
+        lastEventCaptureMs = nowMs
         val snapshot = captureCurrentScreen() ?: return
         ScreenStateBridge.updateSnapshot(snapshot)
     }

@@ -55,6 +55,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import com.example.BuildConfig
@@ -68,6 +70,8 @@ import com.example.security.getActiveProjectId
 import com.example.security.getEffectiveDebugSecret
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 
@@ -77,7 +81,8 @@ enum class ErrorRetryType {
     CONNECTION_CHECK,
     COMMAND,
     VOICE,
-    GAMEPLAY
+    GAMEPLAY,
+    MINI_CHAT
 }
 
 data class CompactErrorState(
@@ -192,6 +197,18 @@ class CommandsViewModel(
         }
     }
 
+    private val packageChangeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val action = intent?.action ?: return
+            if (action == Intent.ACTION_PACKAGE_ADDED ||
+                action == Intent.ACTION_PACKAGE_REMOVED ||
+                action == Intent.ACTION_PACKAGE_REPLACED
+            ) {
+                refreshInstalledAppsCache(forceRefresh = true)
+            }
+        }
+    }
+
     init {
         val debugToken = if (BuildConfig.DEBUG) {
             getEffectiveDebugSecret(appContext)
@@ -203,8 +220,10 @@ class CommandsViewModel(
                 activeProjectId = projId
             )
         }
-        refreshInstalledAppsCache()
+        observeInstalledApps()
+        registerPackageChangeReceiver()
         observeExecutionPauseState()
+        observeActiveTaskBridge()
         if (BuildConfig.DEBUG) {
             checkModelConnection(isInitialSelfCheck = true)
         }
@@ -250,6 +269,12 @@ class CommandsViewModel(
             }
             ErrorRetryType.GAMEPLAY -> {
                 startGameplayGoal(lastGameplayGoal ?: "العب اللعبة أو التطبيق الظاهر على الشاشة كالإنسان خطوة بخطوة")
+            }
+            ErrorRetryType.MINI_CHAT -> {
+                val cmd = error.retryCommand
+                if (!cmd.isNullOrBlank()) {
+                    submitMiniChatCommand(cmd)
+                }
             }
             ErrorRetryType.CONNECTION_CHECK, null -> checkModelConnection()
         }
@@ -363,18 +388,62 @@ class CommandsViewModel(
         }
     }
 
-    private fun refreshInstalledAppsCache() {
+    private fun observeActiveTaskBridge() {
+        viewModelScope.launch {
+            _state
+                .map { it.isAnyTaskRunning }
+                .distinctUntilChanged()
+                .collect { active ->
+                    ScreenStateBridge.setTaskActive(active)
+                }
+        }
+    }
+
+    private fun observeInstalledApps() {
         viewModelScope.launch {
             runCatching {
-                ensureInstalledAppsLoaded(forceRefresh = true)
+                appOrganizer.installedAppsFlow.collect { loaded ->
+                    cachedInstalledApps = loaded
+                    _installedAppsByPackage.value = loaded.associateBy { it.packageName }
+                }
             }
         }
     }
 
-    private suspend fun ensureInstalledAppsLoaded(forceRefresh: Boolean = false): List<InstalledAppInfo> {
-        if (cachedInstalledApps.isEmpty() || forceRefresh) {
-            val saved = appOrganizer.organizationsFlow.first().associateBy { it.packageName }
-            val loaded = appOrganizer.loadInstalledApps(saved)
+    private fun registerPackageChangeReceiver() {
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED)
+            addDataScheme("package")
+        }
+        runCatching {
+            ContextCompat.registerReceiver(
+                appContext,
+                packageChangeReceiver,
+                filter,
+                ContextCompat.RECEIVER_EXPORTED
+            )
+        }
+    }
+
+    fun refreshInstalledAppsCache(forceRefresh: Boolean = true) {
+        viewModelScope.launch {
+            runCatching {
+                if (forceRefresh) {
+                    val refreshed = appOrganizer.refreshInstalledPackagesCache()
+                    cachedInstalledApps = refreshed
+                    _installedAppsByPackage.value = refreshed.associateBy { it.packageName }
+                } else {
+                    ensureInstalledAppsLoaded()
+                }
+            }
+        }
+    }
+
+    private suspend fun ensureInstalledAppsLoaded(): List<InstalledAppInfo> {
+        if (cachedInstalledApps.isEmpty()) {
+            val loaded = appOrganizer.installedAppsFlow.first()
             cachedInstalledApps = loaded
             _installedAppsByPackage.value = loaded.associateBy { it.packageName }
         }
@@ -625,7 +694,7 @@ class CommandsViewModel(
                 if (addUserBubble) {
                     chatHistoryRepository.addUserMessage(command)
                 }
-                val installed = ensureInstalledAppsLoaded(forceRefresh = true)
+                val installed = ensureInstalledAppsLoaded()
                 val appLabels = installed.map { it.label }
 
                 // 1. فحص الممنوعات الصارمة (كلمات مرور، بصمة، دفع، حذف بيانات، تحويل أموال...)
@@ -897,7 +966,16 @@ class CommandsViewModel(
         userCommand: String
     ) {
         val service = ScreenStateBridge.getService()
-        val snapshot = service?.captureCurrentScreen() ?: ScreenStateBridge.latestSnapshot.value
+        val snapshot = if (service != null) {
+            ScreenStateBridge.setScreenReadActive(true)
+            try {
+                service.captureCurrentScreen()
+            } finally {
+                ScreenStateBridge.setScreenReadActive(false)
+            }
+        } else {
+            ScreenStateBridge.latestSnapshot.value
+        }
 
         if (snapshot == null) {
             val msg = "لا يمكنني قراءة الشاشة الآن لأن خدمة إمكانية الوصول غير مفعّلة أو لم تُلتقط شاشة بعد. فعّلها من تبويب «الأذونات» ثم أعد المحاولة."
@@ -1658,18 +1736,57 @@ class CommandsViewModel(
                         it.copy(isBusyWorking = false, statusNoticeAr = "", lastSpokenReply = reply)
                     }
                     speakIfEnabled(reply)
-                    floatingControlManager.showMiniChatReplyAndFold(reply)
+                    floatingControlManager.showMiniChatReply(reply)
                     return@launch
                 }
 
                 val service = ScreenStateBridge.getService()
-                val observation = withContext(Dispatchers.Main) {
-                    service?.captureDetailedScreenForGame()
+                if (service == null) {
+                    val noAccMsg = "خدمة إمكانية الوصول غير مفعلة"
+                    actionLogRepository.logAction(
+                        title = "تعذّر تنفيذ توجيه الدردشة",
+                        details = noAccMsg,
+                        status = ActionStatus.FAILED,
+                        actionType = "MINI_CHAT_NO_ACCESSIBILITY"
+                    )
+                    recordConversationTurn(command, noAccMsg)
+                    chatHistoryRepository.addAgentMessage(noAccMsg, ChatMessageType.ERROR)
+                    _state.update {
+                        it.copy(isBusyWorking = false, statusNoticeAr = "", lastSpokenReply = noAccMsg)
+                    }
+                    speakIfEnabled(noAccMsg)
+                    floatingControlManager.showMiniChatReply(noAccMsg)
+                    return@launch
                 }
-                val screenSummary = observation?.toPromptSummary()
-                    ?: ScreenStateBridge.latestSnapshot.value?.toCompactPromptText()
-                    ?: "الشاشة غير متاحة حالياً."
 
+                val observation = ScreenStateBridge.setScreenReadActive(true).let {
+                    try {
+                        withContext(Dispatchers.Main) {
+                            service.captureDetailedScreenForGame()
+                        }
+                    } finally {
+                        ScreenStateBridge.setScreenReadActive(false)
+                    }
+                }
+                if (observation == null || observation.isNearEmptyTree()) {
+                    val emptyTreeMsg = "لا أرى أزرار اللعبة — صف لي مكان الزر"
+                    actionLogRepository.logAction(
+                        title = "شاشة غير مقروءة في شريط الدردشة",
+                        details = "$command | $emptyTreeMsg",
+                        status = ActionStatus.FAILED,
+                        actionType = "MINI_CHAT_NEAR_EMPTY_TREE"
+                    )
+                    recordConversationTurn(command, emptyTreeMsg)
+                    chatHistoryRepository.addAgentMessage(emptyTreeMsg, ChatMessageType.TEXT)
+                    _state.update {
+                        it.copy(isBusyWorking = false, statusNoticeAr = "", lastSpokenReply = emptyTreeMsg)
+                    }
+                    speakIfEnabled(emptyTreeMsg)
+                    floatingControlManager.showMiniChatReply(emptyTreeMsg)
+                    return@launch
+                }
+
+                val screenSummary = observation.toPromptSummary()
                 val meta = geminiRepository.analyzeMiniChatDirective(
                     userCommand = command,
                     screenSummary = AgentPromptRules.enrichGameContextSummary(screenSummary),
@@ -1679,20 +1796,75 @@ class CommandsViewModel(
                 recordModelRouteUsage(meta, command)
                 val directive = meta.value
 
-                if (directive.shouldAct && service != null) {
-                    generalGameEngine.executeMiniChatDirectiveAction(service, directive)
+                if (directive.shouldAct) {
+                    val executed = generalGameEngine.executeMiniChatDirectiveAction(
+                        service = service,
+                        directive = directive,
+                        observation = observation
+                    )
+                    if (!executed) {
+                        val targetLabel = directive.targetText.ifBlank { command.take(30) }
+                        val failMsg = "تعذّر الضغط على «$targetLabel» — هل ترى الزر على الشاشة؟"
+                        actionLogRepository.logAction(
+                            title = "تعذّر تنفيذ الضغط من الدردشة",
+                            details = "$command | $failMsg",
+                            status = ActionStatus.FAILED,
+                            actionType = "MINI_CHAT_ACTION_FAILED"
+                        )
+                        recordConversationTurn(command, failMsg)
+                        chatHistoryRepository.addAgentMessage(failMsg, ChatMessageType.ERROR)
+                        _state.update {
+                            it.copy(
+                                isBusyWorking = false,
+                                statusNoticeAr = "",
+                                lastSpokenReply = failMsg,
+                                activeError = CompactErrorState(
+                                    titleAr = "تعذّر الضغط على «$targetLabel»",
+                                    summaryAr = failMsg,
+                                    technicalDetails = "action=${directive.action}, target=$targetLabel",
+                                    retryCommand = command,
+                                    retryType = ErrorRetryType.MINI_CHAT
+                                )
+                            )
+                        }
+                        speakIfEnabled(failMsg)
+                        floatingControlManager.showMiniChatReply(failMsg) {
+                            submitMiniChatCommand(command)
+                        }
+                        return@launch
+                    }
                 }
 
-                val replyLine = directive.replyOneLineAr.ifBlank { "تم تنفيذ توجيهك على الشاشة." }
+                val replyLine = directive.replyOneLineAr.ifBlank {
+                    if (directive.shouldAct) "تم تنفيذ توجيهك على الشاشة." else "لم أستطع تنفيذ الضغط"
+                }
+                val isParseFailure = !directive.shouldAct && replyLine == "لم أستطع تنفيذ الضغط"
+                if (isParseFailure) {
+                    actionLogRepository.logAction(
+                        title = "تعذّر فهم توجيه الدردشة",
+                        details = "$command | $replyLine",
+                        status = ActionStatus.FAILED,
+                        actionType = "MINI_CHAT_NON_JSON_REPLY"
+                    )
+                }
                 recordConversationTurn(command, replyLine)
-                chatHistoryRepository.addAgentMessage(replyLine, ChatMessageType.TEXT)
+                chatHistoryRepository.addAgentMessage(
+                    replyLine,
+                    if (isParseFailure) ChatMessageType.ERROR else ChatMessageType.TEXT
+                )
                 _state.update {
                     it.copy(isBusyWorking = false, statusNoticeAr = "", lastSpokenReply = replyLine)
                 }
                 speakIfEnabled(replyLine)
-                floatingControlManager.showMiniChatReplyAndFold(replyLine)
+                if (isParseFailure) {
+                    floatingControlManager.showMiniChatReply(replyLine) {
+                        submitMiniChatCommand(command)
+                    }
+                } else {
+                    floatingControlManager.showMiniChatReply(replyLine)
+                }
 
-                if (directive.continuePlaying && service != null) {
+                if (directive.shouldAct && directive.continuePlaying) {
                     startGameplayLoop(
                         goalText = command.ifBlank { previousGoal ?: "تابع اللعب على الشاشة الحالية" },
                         skipIntroMessage = true
@@ -1702,11 +1874,13 @@ class CommandsViewModel(
                 throw e
             } catch (e: Exception) {
                 val shortErr = classifyModelError(e).category.titleAr
-                floatingControlManager.showMiniChatReplyAndFold("تعذر التنفيذ: $shortErr")
+                floatingControlManager.showMiniChatReply("تعذر التنفيذ: $shortErr") {
+                    submitMiniChatCommand(command)
+                }
                 handleGeminiFailure(
                     contextTag = "Mini chat command",
                     e = e,
-                    retryType = ErrorRetryType.COMMAND,
+                    retryType = ErrorRetryType.MINI_CHAT,
                     retryCommand = command
                 )
             }
@@ -1720,7 +1894,7 @@ class CommandsViewModel(
         ) == PackageManager.PERMISSION_GRANTED
         if (!granted) {
             viewModelScope.launch {
-                floatingControlManager.showMiniChatReplyAndFold("فعّل إذن الميكروفون من تبويب الأذونات أولاً.")
+                floatingControlManager.showMiniChatReply("فعّل إذن الميكروفون من تبويب الأذونات أولاً.")
             }
             return
         }
@@ -1742,13 +1916,13 @@ class CommandsViewModel(
             onAudioRecordedFallback = { _, _ ->
                 viewModelScope.launch {
                     floatingControlManager.setMiniChatVoiceState(isListening = false)
-                    floatingControlManager.showMiniChatReplyAndFold("تحدّث بوضوح أو اكتب أمرك في الشريط.")
+                    floatingControlManager.showMiniChatReply("تحدّث بوضوح أو اكتب أمرك في الشريط.")
                 }
             },
             onError = { err ->
                 viewModelScope.launch {
                     floatingControlManager.setMiniChatVoiceState(isListening = false)
-                    floatingControlManager.showMiniChatReplyAndFold(err.take(80))
+                    floatingControlManager.showMiniChatReply(err.take(80))
                 }
             }
         )
@@ -1998,6 +2172,8 @@ class CommandsViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        ScreenStateBridge.setTaskActive(false)
+        runCatching { appContext.unregisterReceiver(packageChangeReceiver) }
         voiceManager.release()
     }
 
