@@ -43,37 +43,49 @@ val AppTypography = Typography(
     titleLarge = TextStyle(
         fontFamily = CairoFontFamily,
         fontWeight = FontWeight.Bold,
-        fontSize = 20.sp,
-        lineHeight = 28.sp
+        fontSize = 21.sp,
+        lineHeight = 29.sp
     ),
     titleMedium = TextStyle(
         fontFamily = CairoFontFamily,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 17.sp,
-        lineHeight = 24.sp
+        fontSize = 18.sp,
+        lineHeight = 25.sp
     ),
     bodyLarge = TextStyle(
         fontFamily = TajawalFontFamily,
         fontWeight = FontWeight.Normal,
-        fontSize = 16.sp,
-        lineHeight = 24.sp
+        fontSize = 17.sp,
+        lineHeight = 25.sp
     ),
     bodyMedium = TextStyle(
         fontFamily = TajawalFontFamily,
         fontWeight = FontWeight.Normal,
-        fontSize = 14.sp,
-        lineHeight = 21.sp
+        fontSize = 15.5.sp,
+        lineHeight = 23.sp
+    ),
+    bodySmall = TextStyle(
+        fontFamily = TajawalFontFamily,
+        fontWeight = FontWeight.Normal,
+        fontSize = 13.5.sp,
+        lineHeight = 19.sp
     ),
     labelLarge = TextStyle(
         fontFamily = CairoFontFamily,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 15.sp,
-        lineHeight = 20.sp
+        fontSize = 15.5.sp,
+        lineHeight = 21.sp
     ),
     labelMedium = TextStyle(
         fontFamily = CairoFontFamily,
         fontWeight = FontWeight.Medium,
-        fontSize = 12.sp,
-        lineHeight = 16.sp
+        fontSize = 13.sp,
+        lineHeight = 17.sp
+    ),
+    labelSmall = TextStyle(
+        fontFamily = CairoFontFamily,
+        fontWeight = FontWeight.Medium,
+        fontSize = 11.5.sp,
+        lineHeight = 15.sp
     )
 )

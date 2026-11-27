@@ -54,13 +54,22 @@ import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
+import com.example.BuildConfig
 import com.example.chat.ChatTurn
 import com.example.chat.ConversationMemory
-import com.example.BuildConfig
+import com.example.executor.ModelRouteTier
+import com.example.game.ForegroundAppPolicy
 import com.example.security.DisconnectionCategory
 import com.example.security.classifyModelError
 import com.example.security.getActiveProjectId
 import com.example.security.getEffectiveDebugSecret
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 
 private const val TAG = "CommandsViewModel"
 
@@ -112,6 +121,7 @@ data class CommandsScreenState(
     val isBusyWorking: Boolean = false,
     val isGameplayRunning: Boolean = false,
     val isPaused: Boolean = false,
+    val isHandedOver: Boolean = false,
     val statusNoticeAr: String = "",
     val showPlayFeatureDialog: Boolean = false,
     val showAppPickerForGameplay: Boolean = false,
@@ -165,6 +175,22 @@ class CommandsViewModel(
     private var lastSubmittedCommand: String? = null
     private var lastRecordedAudio: Pair<ByteArray, String>? = null
     private var lastGameplayGoal: String? = null
+    private val conversationTurns = mutableListOf<ChatTurn>()
+
+    private fun recordConversationTurn(userMessage: String, agentReply: String) {
+        val cleanUser = userMessage.trim()
+        val cleanReply = agentReply.trim()
+        if (cleanUser.isNotEmpty()) {
+            conversationTurns.add(ChatTurn("user", cleanUser))
+        }
+        if (cleanReply.isNotEmpty()) {
+            conversationTurns.add(ChatTurn("model", cleanReply))
+        }
+        if (conversationTurns.size > 30) {
+            val dropCount = conversationTurns.size - 30
+            repeat(dropCount) { conversationTurns.removeAt(0) }
+        }
+    }
 
     init {
         val debugToken = if (BuildConfig.DEBUG) {
@@ -330,6 +356,11 @@ class CommandsViewModel(
                 _state.update { it.copy(isPaused = paused) }
             }
         }
+        viewModelScope.launch {
+            executionController.isHandedOver.collect { handedOver ->
+                _state.update { it.copy(isHandedOver = handedOver) }
+            }
+        }
     }
 
     private fun refreshInstalledAppsCache() {
@@ -466,6 +497,7 @@ class CommandsViewModel(
                         status = ActionStatus.CANCELLED,
                         actionType = "POLICY_REJECTED_AUDIO"
                     )
+                    recordConversationTurn(transcript, commandPolicy.reasonAr)
                     chatHistoryRepository.addAgentMessage(commandPolicy.reasonAr, ChatMessageType.TEXT)
                     _state.update {
                         it.copy(
@@ -495,6 +527,7 @@ class CommandsViewModel(
                         status = ActionStatus.CANCELLED,
                         actionType = "POLICY_REJECTED_PLAN"
                     )
+                    recordConversationTurn(transcript, planPolicy.reasonAr)
                     chatHistoryRepository.addAgentMessage(planPolicy.reasonAr, ChatMessageType.TEXT)
                     _state.update {
                         it.copy(
@@ -511,6 +544,7 @@ class CommandsViewModel(
 
                 val groundedPlan = screenVerifier.groundPlanAgainstReality(rawPlan, installed)
                 val planSummaryMsg = buildPlanChatSummary(groundedPlan)
+                recordConversationTurn(transcript, planSummaryMsg)
                 chatHistoryRepository.addAgentMessage(planSummaryMsg, ChatMessageType.PLAN)
 
                 _state.update {
@@ -604,6 +638,7 @@ class CommandsViewModel(
                         status = ActionStatus.CANCELLED,
                         actionType = "POLICY_REJECTED"
                     )
+                    recordConversationTurn(command, reason)
                     chatHistoryRepository.addAgentMessage(reason, ChatMessageType.TEXT)
                     _state.update {
                         it.copy(
@@ -627,6 +662,7 @@ class CommandsViewModel(
                                 status = ActionStatus.CANCELLED,
                                 actionType = "POLICY_REJECTED"
                             )
+                            recordConversationTurn(command, commandPolicy.reasonAr)
                             chatHistoryRepository.addAgentMessage(commandPolicy.reasonAr, ChatMessageType.TEXT)
                             _state.update {
                                 it.copy(
@@ -669,6 +705,7 @@ class CommandsViewModel(
                                 status = ActionStatus.CANCELLED,
                                 actionType = "POLICY_REJECTED_PLAN"
                             )
+                            recordConversationTurn(command, planPolicy.reasonAr)
                             chatHistoryRepository.addAgentMessage(planPolicy.reasonAr, ChatMessageType.TEXT)
                             _state.update {
                                 it.copy(
@@ -683,8 +720,10 @@ class CommandsViewModel(
                         }
 
                         val groundedPlan = screenVerifier.groundPlanAgainstReality(rawPlan, installed)
+                        val planSummary = buildPlanChatSummary(groundedPlan)
+                        recordConversationTurn(command, planSummary)
                         chatHistoryRepository.addAgentMessage(
-                            buildPlanChatSummary(groundedPlan),
+                            planSummary,
                             ChatMessageType.PLAN
                         )
 
@@ -737,24 +776,26 @@ class CommandsViewModel(
         installedApps: List<InstalledAppInfo>,
         rawCommand: String? = null
     ) {
+        val cmdText = rawCommand.orEmpty()
         when (route) {
-            is ChatRouteIntent.ShowApps -> handleShowApps(route, installedApps)
-            ChatRouteIntent.ReadScreen -> handleReadScreen(installedApps)
-            ChatRouteIntent.ShowActionHistory -> handleShowActionHistory()
-            ChatRouteIntent.PromptReminderDetails -> handlePromptReminderDetails()
-            is ChatRouteIntent.CreateTaskOrReminder -> handleCreateTaskOrReminder(route)
-            ChatRouteIntent.ListTasksAndReminders -> handleListTasks()
-            is ChatRouteIntent.CancelTaskOrReminder -> handleCancelTaskByQuery(route.queryText)
+            is ChatRouteIntent.ShowApps -> handleShowApps(route, installedApps, cmdText)
+            ChatRouteIntent.ReadScreen -> handleReadScreen(installedApps, cmdText)
+            ChatRouteIntent.ShowActionHistory -> handleShowActionHistory(cmdText)
+            ChatRouteIntent.PromptReminderDetails -> handlePromptReminderDetails(cmdText)
+            is ChatRouteIntent.CreateTaskOrReminder -> handleCreateTaskOrReminder(route, cmdText)
+            ChatRouteIntent.ListTasksAndReminders -> handleListTasks(cmdText)
+            is ChatRouteIntent.CancelTaskOrReminder -> handleCancelTaskByQuery(route.queryText, cmdText)
             is ChatRouteIntent.StartGameplay -> startGameplayGoal(route.goalText)
             is ChatRouteIntent.ConversationalChat -> handleConversationalChat(route.message, rawCommand ?: route.message)
             is ChatRouteIntent.ExecuteCommandPlan -> Unit
         }
     }
 
-    private suspend fun handleShowActionHistory() {
+    private suspend fun handleShowActionHistory(userCommand: String) {
         val recentLogs = actionLogRepository.allLogs.first().take(8)
         if (recentLogs.isEmpty()) {
             val reply = "لم أنفذ أي إجراءات مسجلة بعد. جرّب إعطائي أمراً مثل «اعرض ألعابي» أو «افتح الإعدادات»."
+            recordConversationTurn(userCommand, reply)
             chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
             _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
             speakIfEnabled(reply)
@@ -776,13 +817,15 @@ class CommandsViewModel(
                 appendLine("$badge ${log.title} (${timeFmt.format(Date(log.timestamp))})")
             }
         }.trim()
+        recordConversationTurn(userCommand, summary)
         chatHistoryRepository.addAgentMessage(summary, ChatMessageType.TEXT)
         _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = summary) }
         speakIfEnabled("عرضت لك آخر ${recentLogs.size} إجراءات قمت بها.")
     }
 
-    private suspend fun handlePromptReminderDetails() {
+    private suspend fun handlePromptReminderDetails(userCommand: String) {
         val reply = "بماذا تريدني أن أذكّرك ومتى؟ مثال: «ذكّرني بعد 10 دقائق بشرب الماء» أو «اضبط منبهاً للساعة 7:30 صباحاً». جهّزت لك بداية العبارة في مربع الكتابة."
+        recordConversationTurn(userCommand, reply)
         chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
         _state.update {
             it.copy(
@@ -796,7 +839,8 @@ class CommandsViewModel(
 
     private suspend fun handleShowApps(
         intent: ChatRouteIntent.ShowApps,
-        installedApps: List<InstalledAppInfo>
+        installedApps: List<InstalledAppInfo>,
+        userCommand: String
     ) {
         val visibleApps = installedApps.filter { !it.isHidden }
         val allMatched = visibleApps.filter { app ->
@@ -813,6 +857,7 @@ class CommandsViewModel(
             } else {
                 "لم أجد تطبيقات مطابقة للعرض حالياً."
             }
+            recordConversationTurn(userCommand, reply)
             chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
             _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
             speakIfEnabled(reply)
@@ -836,6 +881,8 @@ class CommandsViewModel(
             " (${filtered.size})"
         }
         val reply = "${intent.titleAr}$countNote: اضغط على أي بطاقة لتشغيله فوراً."
+        val labelsPreview = filtered.take(12).joinToString("، ") { it.label }
+        recordConversationTurn(userCommand, "$reply ($labelsPreview)")
         chatHistoryRepository.addAgentMessage(
             text = reply,
             type = ChatMessageType.APPS_LIST,
@@ -845,12 +892,16 @@ class CommandsViewModel(
         speakIfEnabled(reply)
     }
 
-    private suspend fun handleReadScreen(installedApps: List<InstalledAppInfo>) {
+    private suspend fun handleReadScreen(
+        installedApps: List<InstalledAppInfo>,
+        userCommand: String
+    ) {
         val service = ScreenStateBridge.getService()
         val snapshot = service?.captureCurrentScreen() ?: ScreenStateBridge.latestSnapshot.value
 
         if (snapshot == null) {
             val msg = "لا يمكنني قراءة الشاشة الآن لأن خدمة إمكانية الوصول غير مفعّلة أو لم تُلتقط شاشة بعد. فعّلها من تبويب «الأذونات» ثم أعد المحاولة."
+            recordConversationTurn(userCommand, msg)
             chatHistoryRepository.addAgentMessage(msg, ChatMessageType.SCREEN_READ)
             _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = msg) }
             speakIfEnabled(msg)
@@ -859,6 +910,7 @@ class CommandsViewModel(
 
         if (snapshot.hasSensitiveSecurityField) {
             val msg = "رصدت حقلاً حساساً (كلمة مرور أو دفع أو بصمة) على الشاشة الحالية؛ لذلك أمتنع عن قراءة محتواها حفاظاً على خصوصيتك."
+            recordConversationTurn(userCommand, msg)
             chatHistoryRepository.addAgentMessage(msg, ChatMessageType.SCREEN_READ)
             _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = msg) }
             speakIfEnabled(msg)
@@ -900,12 +952,16 @@ class CommandsViewModel(
             "تعذر التلخيص الذكي عبر Gemini ($reason)، وهذه العناصر الفعلية المرصودة في شاشتك الآن:\n$factualElements"
         }
 
+        recordConversationTurn(userCommand, groundedReply)
         chatHistoryRepository.addAgentMessage(groundedReply, ChatMessageType.SCREEN_READ)
         _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = groundedReply) }
         speakIfEnabled(groundedReply)
     }
 
-    private suspend fun handleCreateTaskOrReminder(intent: ChatRouteIntent.CreateTaskOrReminder) {
+    private suspend fun handleCreateTaskOrReminder(
+        intent: ChatRouteIntent.CreateTaskOrReminder,
+        userCommand: String
+    ) {
         val shouldScheduleAlarm = intent.taskType == AgentTaskType.REMINDER ||
             intent.taskType == AgentTaskType.ALARM ||
             intent.delayMinutes != null ||
@@ -948,6 +1004,7 @@ class CommandsViewModel(
         chatHistoryRepository.createTask(entity)
 
         val reply = "تم حفظ ${intent.taskType.titleAr} «${intent.title}»$scheduleNoteAr."
+        recordConversationTurn(userCommand, reply)
         actionLogRepository.logAction(
             title = "إنشاء ${intent.taskType.titleAr}: ${intent.title}",
             details = reply,
@@ -965,10 +1022,11 @@ class CommandsViewModel(
         speakIfEnabled(reply)
     }
 
-    private suspend fun handleListTasks() {
+    private suspend fun handleListTasks(userCommand: String) {
         val active = chatHistoryRepository.getActiveTasks()
         if (active.isEmpty()) {
             val reply = "لا توجد لديك تذكيرات أو مهام أو منبهات نشطة حالياً. يمكنك قول: «ذكّرني بعد 10 دقائق بشرب الماء»."
+            recordConversationTurn(userCommand, reply)
             chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
             _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
             speakIfEnabled(reply)
@@ -976,6 +1034,7 @@ class CommandsViewModel(
         }
 
         val reply = "لديك ${active.size} عناصر في قائمة المهام والتذكيرات والمنبهات:"
+        recordConversationTurn(userCommand, "$reply (${active.take(8).joinToString("، ") { it.title }})")
         chatHistoryRepository.addAgentMessage(
             text = reply,
             type = ChatMessageType.TASKS_LIST,
@@ -985,10 +1044,11 @@ class CommandsViewModel(
         speakIfEnabled(reply)
     }
 
-    private suspend fun handleCancelTaskByQuery(queryText: String) {
+    private suspend fun handleCancelTaskByQuery(queryText: String, userCommand: String) {
         val active = chatHistoryRepository.getActiveTasks()
         if (active.isEmpty()) {
             val reply = "لا توجد تذكيرات أو مهام نشطة لإلغائها حالياً."
+            recordConversationTurn(userCommand, reply)
             chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
             _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
             speakIfEnabled(reply)
@@ -1006,6 +1066,7 @@ class CommandsViewModel(
 
         if (matched == null) {
             val reply = "لست متأكداً أي تذكير تقصد إلغاءه بـ «$queryText». هذه قائمتك الحالية لتختار منه بوضوح:"
+            recordConversationTurn(userCommand, reply)
             chatHistoryRepository.addAgentMessage(
                 text = reply,
                 type = ChatMessageType.TASKS_LIST,
@@ -1022,6 +1083,7 @@ class CommandsViewModel(
         chatHistoryRepository.cancelTask(matched.id)
 
         val reply = "تم إلغاء «${matched.title}»${if (matched.alarmRequestCode != null) " وإيقاف المنبه المجدول له" else ""}."
+        recordConversationTurn(userCommand, reply)
         actionLogRepository.logAction(
             title = "إلغاء ${AgentTaskType.entries.firstOrNull { it.name == matched.taskType }?.titleAr ?: "مهمة"}",
             details = reply,
@@ -1039,8 +1101,6 @@ class CommandsViewModel(
         speakIfEnabled(reply)
     }
 
-    private val conversationTurns = mutableListOf<ChatTurn>()
-
     private suspend fun handleConversationalChat(userMessage: String, retryCommand: String = userMessage) {
         val installed = ensureInstalledAppsLoaded()
         val appLabels = installed.map { it.label }
@@ -1055,12 +1115,7 @@ class CommandsViewModel(
                 } else {
                     "لا، «$foundApp» غير مثبّتة على هاتفك."
                 }
-                conversationTurns.add(ChatTurn("user", userMessage))
-                conversationTurns.add(ChatTurn("model", reply))
-                if (conversationTurns.size > 30) {
-                    val dropCount = conversationTurns.size - 30
-                    repeat(dropCount) { conversationTurns.removeAt(0) }
-                }
+                recordConversationTurn(userMessage, reply)
                 chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
                 _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
                 speakIfEnabled(reply)
@@ -1088,13 +1143,7 @@ class CommandsViewModel(
                 modelTier = modelTier
             )
             recordModelRouteUsage(meta, userMessage)
-
-            conversationTurns.add(ChatTurn("user", userMessage))
-            conversationTurns.add(ChatTurn("model", meta.value))
-            if (conversationTurns.size > 30) {
-                val dropCount = conversationTurns.size - 30
-                repeat(dropCount) { conversationTurns.removeAt(0) }
-            }
+            recordConversationTurn(userMessage, meta.value)
 
             chatHistoryRepository.addAgentMessage(meta.value, ChatMessageType.TEXT)
             _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = meta.value) }
@@ -1156,24 +1205,28 @@ class CommandsViewModel(
         }
     }
 
-    private fun startGameplayLoop(goalText: String) {
+    private fun startGameplayLoop(goalText: String, skipIntroMessage: Boolean = false) {
         activeTaskJob?.cancel()
         executionJob?.cancel()
         gameLoopJob?.cancel()
         executionController.reset()
+        lastGameplayGoal = goalText
 
         gameLoopJob = viewModelScope.launch {
             _state.update {
                 it.copy(
                     isGameplayRunning = true,
                     isPaused = false,
+                    isHandedOver = false,
                     statusNoticeAr = "يتولّى الوكيل اللعب الآن... ${AgentPromptRules.WAIT_THINKING_NOTICE_AR}",
                     uiState = CommandsUiState.Idle
                 )
             }
-            val startMsg = "تولّى الوكيل اللعب: سأراقب الشاشة الحقيقية وأتفاعل كالإنسان خطوة بخطوة. تذكّر أنني أحتاج بضع ثوانٍ للتفكير قبل كل حركة، ويمكنك إيقافي أو إكماله بنفسك في أي لحظة."
-            chatHistoryRepository.addAgentMessage(startMsg, ChatMessageType.GAME_STATUS)
-            speakIfEnabled(startMsg)
+            if (!skipIntroMessage) {
+                val startMsg = "تولّى الوكيل اللعب: سأراقب الشاشة الحقيقية وأتفاعل كالإنسان خطوة بخطوة. تذكّر أنني أحتاج بضع ثوانٍ للتفكير قبل كل حركة، ويمكنك إيقافي أو إكماله بنفسك في أي لحظة."
+                chatHistoryRepository.addAgentMessage(startMsg, ChatMessageType.GAME_STATUS)
+                speakIfEnabled(startMsg)
+            }
 
             try {
                 val result = generalGameEngine.runObserveAndActLoop(
@@ -1185,6 +1238,7 @@ class CommandsViewModel(
                     },
                     callbacks = buildFloatingControlCallbacks()
                 )
+                recordConversationTurn(goalText, result.summaryAr)
                 chatHistoryRepository.addAgentMessage(result.summaryAr, ChatMessageType.GAME_STATUS)
                 _state.update { it.copy(lastSpokenReply = result.summaryAr) }
                 speakIfEnabled(result.summaryAr)
@@ -1199,7 +1253,12 @@ class CommandsViewModel(
             } finally {
                 executionController.reset()
                 _state.update {
-                    it.copy(isGameplayRunning = false, isPaused = false, statusNoticeAr = "")
+                    it.copy(
+                        isGameplayRunning = false,
+                        isPaused = false,
+                        isHandedOver = false,
+                        statusNoticeAr = ""
+                    )
                 }
             }
         }
@@ -1262,6 +1321,7 @@ class CommandsViewModel(
 
     fun clearChatHistory() {
         viewModelScope.launch {
+            conversationTurns.clear()
             chatHistoryRepository.clearChatHistory()
             _state.update { it.copy(lastSpokenReply = "", executionTruthReportAr = null) }
         }
@@ -1278,14 +1338,34 @@ class CommandsViewModel(
                 it.copy(
                     isExecuting = true,
                     isPaused = false,
+                    isHandedOver = false,
                     statusNoticeAr = "بدأت تنفيذ الخطة خطوة بخطوة... ${AgentPromptRules.WAIT_THINKING_NOTICE_AR}",
                     executionTruthReportAr = null
                 )
             }
             val succeededList = mutableListOf<String>()
             val failedList = mutableListOf<String>()
-
-
+            val overlayWatcherJob = launch {
+                while (isActive) {
+                    val service = ScreenStateBridge.getService()
+                    if (service != null) {
+                        val fgPkg = generalGameEngine.resolveForegroundPackage(service)
+                        if (ForegroundAppPolicy.shouldShowFloatingOverlay(fgPkg, appContext.packageName)) {
+                            floatingControlManager.show(
+                                initialStatusAr = _state.value.statusNoticeAr.ifBlank { "ينفّذ خطوات الخطة" },
+                                isPaused = executionController.isPaused.value,
+                                callbacks = buildFloatingControlCallbacks()
+                            )
+                            floatingControlManager.setHostVisible(true)
+                        } else {
+                            floatingControlManager.setHostVisible(false)
+                        }
+                    } else {
+                        floatingControlManager.setHostVisible(false)
+                    }
+                    delay(350L)
+                }
+            }
 
             try {
                 var plan = currentState.plan
@@ -1461,9 +1541,17 @@ class CommandsViewModel(
                     retryCommand = lastSubmittedCommand
                 )
             } finally {
+                overlayWatcherJob.cancel()
                 executionController.reset()
                 floatingControlManager.dismiss()
-                _state.update { it.copy(isExecuting = false, isPaused = false, statusNoticeAr = "") }
+                _state.update {
+                    it.copy(
+                        isExecuting = false,
+                        isPaused = false,
+                        isHandedOver = false,
+                        statusNoticeAr = ""
+                    )
+                }
             }
         }
     }
@@ -1475,21 +1563,194 @@ class CommandsViewModel(
         } else {
             "استئناف العمل... ${AgentPromptRules.WAIT_THINKING_NOTICE_AR}"
         }
-        _state.update { it.copy(isPaused = paused, statusNoticeAr = statusText) }
+        _state.update { it.copy(isPaused = paused, isHandedOver = false, statusNoticeAr = statusText) }
         viewModelScope.launch {
             floatingControlManager.updateStatus(statusText, paused)
         }
     }
 
     /**
-     * «أكمل بنفسي»: يتوقف الوكيل ويسلّم التحكم للمستخدم فوراً، مع إخفاء اللوحة العائمة.
+     * «أكمل بنفسي»: يوقف الوكيل مؤقتاً ويسلّم التحكم للمستخدم مع طي الحبّة إلى فقاعة 56dp وزر «استئناف الوكيل».
+     * لا يستدعي dismiss() أبداً — الإغلاق الكامل مخصص لزر «إيقاف» فقط.
      */
     fun handOverControlToUser() {
-        terminateRunningJobs(
-            clearPlan = false,
-            chatMessage = "توقّف الوكيل وسلمك التحكم — يمكنك الإكمال بنفسك الآن.",
-            logTitle = "تسليم التحكم للمستخدم (أكمل بنفسي)",
-            logActionType = "USER_TAKEOVER"
+        executionController.setHandedOver(true)
+        voiceManager.stopSpeaking()
+        val statusText = "تم تسليم التحكم لك — اضغط «استئناف الوكيل» متى أردت المتابعة."
+        _state.update {
+            it.copy(
+                isPaused = true,
+                isHandedOver = true,
+                statusNoticeAr = statusText,
+                lastSpokenReply = statusText
+            )
+        }
+        viewModelScope.launch {
+            floatingControlManager.collapseToHandOverBubble()
+            chatHistoryRepository.addAgentMessage(statusText, ChatMessageType.TEXT)
+            actionLogRepository.logAction(
+                title = "تسليم التحكم للمستخدم (أكمل بنفسي)",
+                details = statusText,
+                status = ActionStatus.SUCCESS,
+                actionType = "USER_TAKEOVER"
+            )
+        }
+    }
+
+    fun resumeFromHandOver() {
+        executionController.setHandedOver(false)
+        val statusText = "تم استئناف عمل الوكيل... ${AgentPromptRules.WAIT_THINKING_NOTICE_AR}"
+        _state.update {
+            it.copy(
+                isPaused = false,
+                isHandedOver = false,
+                statusNoticeAr = statusText
+            )
+        }
+        viewModelScope.launch {
+            floatingControlManager.resumeFromHandOver()
+            actionLogRepository.logAction(
+                title = "استئناف عمل الوكيل بعد تسليم التحكم",
+                details = statusText,
+                status = ActionStatus.SUCCESS,
+                actionType = "AGENT_RESUME"
+            )
+        }
+    }
+
+    fun submitMiniChatCommand(rawCommand: String) {
+        val command = rawCommand.trim()
+        if (command.isEmpty()) return
+
+        val wasGameplay = _state.value.isGameplayRunning || _state.value.isHandedOver
+        val previousGoal = lastGameplayGoal
+
+        // مقاطعة الخطة أو حلقة اللعب الجارية دون إغلاق الشريط/الحبّة العائمة
+        activeTaskJob?.cancel()
+        executionJob?.cancel()
+        gameLoopJob?.cancel()
+        executionController.reset()
+        approvalDeferred?.complete(false)
+        approvalDeferred = null
+        voiceManager.stopSpeaking()
+
+        activeTaskJob = viewModelScope.launch {
+            _state.update {
+                it.copy(
+                    isBusyWorking = true,
+                    isExecuting = false,
+                    isGameplayRunning = false,
+                    isPaused = false,
+                    isHandedOver = false,
+                    statusNoticeAr = "ينفّذ توجيه شريط الدردشة المصغّر…"
+                )
+            }
+            chatHistoryRepository.addUserMessage(command)
+            floatingControlManager.updateStatus("يفكر في توجيهك", isPaused = false)
+
+            try {
+                val forbidden = agentPolicy.findForbiddenCategory(command)
+                if (forbidden != null) {
+                    val reply = "ممنوع وفق السياسة: ${forbidden.titleAr}"
+                    recordConversationTurn(command, reply)
+                    chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
+                    _state.update {
+                        it.copy(isBusyWorking = false, statusNoticeAr = "", lastSpokenReply = reply)
+                    }
+                    speakIfEnabled(reply)
+                    floatingControlManager.showMiniChatReplyAndFold(reply)
+                    return@launch
+                }
+
+                val service = ScreenStateBridge.getService()
+                val observation = withContext(Dispatchers.Main) {
+                    service?.captureDetailedScreenForGame()
+                }
+                val screenSummary = observation?.toPromptSummary()
+                    ?: ScreenStateBridge.latestSnapshot.value?.toCompactPromptText()
+                    ?: "الشاشة غير متاحة حالياً."
+
+                val meta = geminiRepository.analyzeMiniChatDirective(
+                    userCommand = command,
+                    screenSummary = AgentPromptRules.enrichGameContextSummary(screenSummary),
+                    history = ConversationMemory.formatHistory(conversationTurns),
+                    wasGameplayRunning = wasGameplay
+                )
+                recordModelRouteUsage(meta, command)
+                val directive = meta.value
+
+                if (directive.shouldAct && service != null) {
+                    generalGameEngine.executeMiniChatDirectiveAction(service, directive)
+                }
+
+                val replyLine = directive.replyOneLineAr.ifBlank { "تم تنفيذ توجيهك على الشاشة." }
+                recordConversationTurn(command, replyLine)
+                chatHistoryRepository.addAgentMessage(replyLine, ChatMessageType.TEXT)
+                _state.update {
+                    it.copy(isBusyWorking = false, statusNoticeAr = "", lastSpokenReply = replyLine)
+                }
+                speakIfEnabled(replyLine)
+                floatingControlManager.showMiniChatReplyAndFold(replyLine)
+
+                if (directive.continuePlaying && service != null) {
+                    startGameplayLoop(
+                        goalText = command.ifBlank { previousGoal ?: "تابع اللعب على الشاشة الحالية" },
+                        skipIntroMessage = true
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val shortErr = classifyModelError(e).category.titleAr
+                floatingControlManager.showMiniChatReplyAndFold("تعذر التنفيذ: $shortErr")
+                handleGeminiFailure(
+                    contextTag = "Mini chat command",
+                    e = e,
+                    retryType = ErrorRetryType.COMMAND,
+                    retryCommand = command
+                )
+            }
+        }
+    }
+
+    fun toggleMiniChatMic() {
+        val granted = ContextCompat.checkSelfPermission(
+            appContext,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            viewModelScope.launch {
+                floatingControlManager.showMiniChatReplyAndFold("فعّل إذن الميكروفون من تبويب الأذونات أولاً.")
+            }
+            return
+        }
+        viewModelScope.launch {
+            floatingControlManager.setMiniChatVoiceState(isListening = true)
+        }
+        voiceManager.startListening(
+            onPartialResult = { partial ->
+                viewModelScope.launch {
+                    floatingControlManager.setMiniChatVoiceState(isListening = true, partialText = partial)
+                }
+            },
+            onFinalTranscript = { transcript ->
+                viewModelScope.launch {
+                    floatingControlManager.setMiniChatVoiceState(isListening = false, partialText = transcript)
+                }
+                submitMiniChatCommand(transcript)
+            },
+            onAudioRecordedFallback = { _, _ ->
+                viewModelScope.launch {
+                    floatingControlManager.setMiniChatVoiceState(isListening = false)
+                    floatingControlManager.showMiniChatReplyAndFold("تحدّث بوضوح أو اكتب أمرك في الشريط.")
+                }
+            },
+            onError = { err ->
+                viewModelScope.launch {
+                    floatingControlManager.setMiniChatVoiceState(isListening = false)
+                    floatingControlManager.showMiniChatReplyAndFold(err.take(80))
+                }
+            }
         )
     }
 
@@ -1562,6 +1823,7 @@ class CommandsViewModel(
                 isExecuting = false,
                 isGameplayRunning = false,
                 isPaused = false,
+                isHandedOver = false,
                 isListening = false,
                 statusNoticeAr = "",
                 pendingApprovalStep = null,
@@ -1595,6 +1857,18 @@ class CommandsViewModel(
 
             override fun onTakeOverByUser() {
                 handOverControlToUser()
+            }
+
+            override fun onResumeAgent() {
+                resumeFromHandOver()
+            }
+
+            override fun onMiniChatSubmit(command: String) {
+                submitMiniChatCommand(command)
+            }
+
+            override fun onMiniChatMicClick() {
+                toggleMiniChatMic()
             }
         }
     }

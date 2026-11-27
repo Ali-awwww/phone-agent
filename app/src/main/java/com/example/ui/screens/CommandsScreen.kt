@@ -150,10 +150,13 @@ fun CommandsScreen(
 
     val plan = (state.uiState as? CommandsUiState.PlanActive)?.plan
     val isRecording = state.isListening
+    val isPaused = state.isPaused
+    val isHandedOver = state.isHandedOver
     val isAnyTaskRunning = state.isAnyTaskRunning
-    val canPauseOrTakeOver = state.isExecuting || state.isGameplayRunning
+    val canPauseOrTakeOver = state.isExecuting || state.isGameplayRunning || isHandedOver
     val showInChatExecutionBubble = isAnyTaskRunning ||
-        state.isPaused ||
+        isPaused ||
+        isHandedOver ||
         (state.statusNoticeAr.isNotBlank() && state.modelConnectionStatus !is ModelConnectionStatus.Checking)
     val listState = rememberLazyListState()
 
@@ -206,19 +209,19 @@ fun CommandsScreen(
                 .padding(horizontal = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // 1) شريط علوي نظيف يجمع العنوان وحالة الأذونات وأزرار التحكم داخل حاوية واضحة
+            // 1) شريط علوي بأسلوب iPhone يجمع العنوان وحالة الأذونات وأزرار التحكم
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 6.dp),
-                shape = RoundedCornerShape(14.dp),
+                shape = RoundedCornerShape(20.dp),
                 color = CyberSurfaceNavy,
-                border = BorderStroke(1.dp, CyberBorderGlow)
+                border = BorderStroke(0.75.dp, CyberBorderGlow.copy(alpha = 0.7f))
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -231,24 +234,24 @@ fun CommandsScreen(
                             text = "دردشة الوكيل",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
-                            color = CyberElectricCyan,
+                            color = CyberTextPrimary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
                         Surface(
                             modifier = Modifier
-                                .heightIn(min = 36.dp)
+                                .heightIn(min = 34.dp)
                                 .clickable(onClick = onOpenPermissionsTab),
-                            shape = MaterialTheme.shapes.small,
+                            shape = CircleShape,
                             color = if (isAccessibilityConnected) StatusSuccessContainer else StatusPendingContainer,
                             border = BorderStroke(
-                                1.dp,
-                                if (isAccessibilityConnected) StatusSuccess else StatusPending
+                                0.8.dp,
+                                if (isAccessibilityConnected) StatusSuccess.copy(alpha = 0.75f) else StatusPending.copy(alpha = 0.75f)
                             )
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
@@ -272,9 +275,9 @@ fun CommandsScreen(
                     Spacer(Modifier.width(6.dp))
 
                     Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = CyberBgDeep,
-                        border = BorderStroke(1.dp, CyberBorderGlow.copy(alpha = 0.7f))
+                        shape = CircleShape,
+                        color = CyberSurfaceElevated,
+                        border = BorderStroke(0.75.dp, CyberBorderGlow.copy(alpha = 0.6f))
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             IconButton(
@@ -430,15 +433,18 @@ fun CommandsScreen(
                                 onStop = { viewModel.stopCurrentTask() },
                                 onCancel = { viewModel.cancelCurrentTask() },
                                 onTogglePauseResume = { viewModel.togglePauseResume() },
-                                onTakeOver = { viewModel.handOverControlToUser() }
+                                onTakeOver = { viewModel.handOverControlToUser() },
+                                onResumeAgent = { viewModel.resumeFromHandOver() }
                             )
                         }
                         ChatLiveExecutionBubble(
                             statusText = state.statusNoticeAr.ifBlank {
-                                if (state.isPaused) "المهمة متوقفة مؤقتاً — بانتظارك"
+                                if (isHandedOver) "سلّمتك التحكم — اضغط «استئناف الوكيل» متى أردت المتابعة."
+                                else if (isPaused) "المهمة متوقفة مؤقتاً — بانتظارك"
                                 else AgentPromptRules.WAIT_THINKING_NOTICE_AR
                             },
-                            isPaused = state.isPaused,
+                            isPaused = isPaused,
+                            isHandedOver = isHandedOver,
                             canPauseOrTakeOver = canPauseOrTakeOver,
                             actions = liveActions
                         )
@@ -446,18 +452,18 @@ fun CommandsScreen(
                 }
             }
 
-            // 5) حاوية واحدة نظيفة للأوامر الجاهزة القابلة للتمرير أفقياً فوق شريط الإدخال
+            // 5) حاوية كبسولات الأوامر الجاهزة بأسلوب iPhone
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("quick_presets_container"),
-                shape = RoundedCornerShape(14.dp),
+                shape = RoundedCornerShape(18.dp),
                 color = CyberSurfaceNavy,
-                border = BorderStroke(1.dp, CyberBorderGlow.copy(alpha = 0.75f))
+                border = BorderStroke(0.75.dp, CyberBorderGlow.copy(alpha = 0.6f))
             ) {
                 LazyRow(
                     modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -466,15 +472,15 @@ fun CommandsScreen(
                             selected = false,
                             enabled = !isAnyTaskRunning,
                             onClick = { viewModel.analyzeAndPlanCommand(suggestion) },
-                            modifier = Modifier.heightIn(min = 40.dp),
-                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.heightIn(min = 38.dp),
+                            shape = CircleShape,
                             colors = FilterChipDefaults.filterChipColors(
-                                containerColor = CyberBgDeep,
-                                labelColor = CyberSoftCyan,
-                                disabledContainerColor = CyberBgDeep.copy(alpha = 0.5f),
+                                containerColor = CyberSurfaceElevated,
+                                labelColor = CyberTextPrimary,
+                                disabledContainerColor = CyberSurfaceElevated.copy(alpha = 0.5f),
                                 disabledLabelColor = CyberTextSecondary
                             ),
-                            border = BorderStroke(1.dp, CyberBorderGlow),
+                            border = BorderStroke(0.75.dp, CyberBorderGlow.copy(alpha = 0.65f)),
                             label = {
                                 Text(
                                     text = suggestion,
@@ -488,19 +494,19 @@ fun CommandsScreen(
                 }
             }
 
-            // 6) شريط إدخال الصوت والكتابة السفلي
+            // 6) شريط إدخال الصوت والكتابة السفلي بأسلوب iMessage
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 8.dp),
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(24.dp),
                 color = CyberSurfaceNavy,
                 border = BorderStroke(
-                    1.dp,
-                    if (isRecording) StatusCancelled else CyberBorderGlow
+                    0.9.dp,
+                    if (isRecording) StatusCancelled else CyberBorderGlow.copy(alpha = 0.75f)
                 )
             ) {
-                Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
                     if (isRecording) {
                         Text(
                             text = if (state.partialTranscript.isNotBlank()) {
@@ -517,7 +523,7 @@ fun CommandsScreen(
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         IconButton(
                             onClick = {
@@ -535,7 +541,7 @@ fun CommandsScreen(
                                 .testTag("voice_capture_button"),
                             colors = IconButtonDefaults.iconButtonColors(
                                 containerColor = if (isRecording) StatusCancelledContainer else CyberSurfaceElevated,
-                                contentColor = if (isRecording) StatusCancelled else CyberElectricCyan
+                                contentColor = if (isRecording) StatusCancelled else CyberTextPrimary
                             )
                         ) {
                             Icon(
@@ -570,19 +576,19 @@ fun CommandsScreen(
                             ),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = CyberElectricCyan,
-                                unfocusedBorderColor = Color.Transparent,
-                                focusedContainerColor = CyberBgDeep,
-                                unfocusedContainerColor = CyberBgDeep,
+                                unfocusedBorderColor = CyberBorderGlow.copy(alpha = 0.5f),
+                                focusedContainerColor = CyberSurfaceElevated,
+                                unfocusedContainerColor = CyberSurfaceElevated,
                                 focusedTextColor = CyberTextPrimary,
                                 unfocusedTextColor = CyberTextPrimary
                             ),
-                            shape = MaterialTheme.shapes.small
+                            shape = RoundedCornerShape(20.dp)
                         )
 
                         Surface(
                             shape = CircleShape,
                             color = if (state.inputText.isNotBlank() && !isAnyTaskRunning) {
-                                CyberElectricCyan
+                                CyberElectricBlue
                             } else {
                                 CyberSurfaceElevated
                             }
@@ -598,7 +604,7 @@ fun CommandsScreen(
                                     imageVector = Icons.AutoMirrored.Rounded.Send,
                                     contentDescription = "إرسال",
                                     tint = if (state.inputText.isNotBlank() && !isAnyTaskRunning) {
-                                        CyberOnCyan
+                                        Color.White
                                     } else {
                                         CyberTextSecondary
                                     }

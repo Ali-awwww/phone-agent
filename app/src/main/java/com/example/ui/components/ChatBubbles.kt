@@ -116,12 +116,12 @@ data class ChatLiveExecutionActions(
     val onStop: () -> Unit,
     val onCancel: () -> Unit,
     val onTogglePauseResume: () -> Unit = {},
-    val onTakeOver: () -> Unit = {}
+    val onTakeOver: () -> Unit = {},
+    val onResumeAgent: () -> Unit = {}
 )
 
 /**
- * فقاعة حالة التحضير والتنفيذ داخل تدفق المحادثة نفسه (بديل البطاقة الحمراء المنفصلة).
- * تعرض مؤشر كتابة متحركاً أثناء التحضير/التنفيذ مع أزرار صغيرة مدمجة للإيقاف والإلغاء.
+ * فقاعة حالة التحضير والتنفيذ المضغوطة داخل تدفق المحادثة نفسه.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -130,18 +130,19 @@ fun ChatLiveExecutionBubble(
     isPaused: Boolean,
     canPauseOrTakeOver: Boolean,
     actions: ChatLiveExecutionActions,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isHandedOver: Boolean = false
 ) {
     val bubbleShape = RoundedCornerShape(
-        topStart = 4.dp,
-        topEnd = 18.dp,
-        bottomStart = 18.dp,
-        bottomEnd = 18.dp
+        topStart = 6.dp,
+        topEnd = 16.dp,
+        bottomStart = 16.dp,
+        bottomEnd = 16.dp
     )
-    val borderColor = if (isPaused) {
-        StatusPending.copy(alpha = 0.75f)
-    } else {
-        CyberElectricCyan.copy(alpha = 0.55f)
+    val borderColor = when {
+        isHandedOver -> CyberElectricCyan.copy(alpha = 0.65f)
+        isPaused -> StatusPending.copy(alpha = 0.65f)
+        else -> CyberBorderGlow
     }
 
     Row(
@@ -153,15 +154,15 @@ fun ChatLiveExecutionBubble(
     ) {
         Surface(
             modifier = Modifier
-                .widthIn(max = 320.dp)
+                .widthIn(max = 256.dp)
                 .clip(bubbleShape),
             shape = bubbleShape,
             color = CyberSurfaceNavy,
-            border = BorderStroke(1.dp, borderColor)
+            border = BorderStroke(0.85.dp, borderColor)
         ) {
             Column(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -170,98 +171,128 @@ fun ChatLiveExecutionBubble(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.SmartToy,
                             contentDescription = null,
                             tint = if (isPaused) StatusPending else CyberElectricCyan,
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(14.dp)
                         )
                         Text(
-                            text = "وكيل الهاتف",
-                            style = MaterialTheme.typography.labelMedium,
+                            text = when {
+                                isHandedOver -> "سلّمتك التحكم"
+                                isPaused -> "متوقف مؤقتاً"
+                                else -> "وكيل الهاتف"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             color = if (isPaused) StatusPending else CyberElectricCyan
                         )
                     }
 
-                    if (isPaused) {
-                        Text(
-                            text = "متوقف مؤقتاً",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = StatusPending
-                        )
-                    } else {
+                    if (!isHandedOver && !isPaused) {
                         AnimatedTypingDots()
                     }
                 }
 
                 Text(
                     text = statusText,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodySmall,
                     color = CyberTextPrimary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                     softWrap = true
                 )
 
                 FlowRow(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    if (isHandedOver) {
+                        FilledTonalButton(
+                            onClick = actions.onResumeAgent,
+                            modifier = Modifier
+                                .defaultMinSize(minWidth = 1.dp, minHeight = 32.dp)
+                                .height(32.dp)
+                                .testTag("resume_agent_button"),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = CyberElectricBlue,
+                                contentColor = Color.White
+                            ),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.PlayArrow,
+                                contentDescription = "استئناف الوكيل",
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(Modifier.width(3.dp))
+                            Text(
+                                text = "استئناف",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+
                     FilledTonalButton(
                         onClick = actions.onStop,
                         modifier = Modifier
-                            .defaultMinSize(minWidth = 1.dp, minHeight = 36.dp)
-                            .minimumInteractiveComponentSize()
+                            .defaultMinSize(minWidth = 1.dp, minHeight = 32.dp)
+                            .height(32.dp)
                             .testTag("stop_active_task_button"),
                         shape = RoundedCornerShape(10.dp),
                         colors = ButtonDefaults.filledTonalButtonColors(
-                            containerColor = CyberSurfaceElevated,
-                            contentColor = CyberSoftCyan
+                            containerColor = StatusCancelledContainer,
+                            contentColor = StatusCancelled
                         ),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                        border = BorderStroke(0.75.dp, StatusCancelled.copy(alpha = 0.45f)),
+                        contentPadding = PaddingValues(horizontal = 9.dp, vertical = 2.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Stop,
                             contentDescription = "إيقاف المهمة فوراً",
-                            modifier = Modifier.size(15.dp)
+                            modifier = Modifier.size(13.dp)
                         )
-                        Spacer(Modifier.width(4.dp))
+                        Spacer(Modifier.width(3.dp))
                         Text(
                             text = "إيقاف",
-                            style = MaterialTheme.typography.labelMedium,
+                            style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             softWrap = false
                         )
                     }
 
-                    if (canPauseOrTakeOver) {
+                    if (canPauseOrTakeOver && !isHandedOver) {
                         OutlinedButton(
                             onClick = actions.onTogglePauseResume,
                             modifier = Modifier
-                                .defaultMinSize(minWidth = 1.dp, minHeight = 36.dp)
-                                .minimumInteractiveComponentSize()
+                                .defaultMinSize(minWidth = 1.dp, minHeight = 32.dp)
+                                .height(32.dp)
                                 .testTag("pause_resume_task_button"),
                             shape = RoundedCornerShape(10.dp),
                             border = BorderStroke(
-                                1.dp,
+                                0.8.dp,
                                 if (isPaused) StatusSuccess.copy(alpha = 0.7f) else CyberBorderGlow
                             ),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                         ) {
                             Icon(
                                 imageVector = if (isPaused) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
                                 contentDescription = if (isPaused) "استئناف" else "إيقاف مؤقت",
                                 tint = if (isPaused) StatusSuccess else CyberElectricCyan,
-                                modifier = Modifier.size(15.dp)
+                                modifier = Modifier.size(13.dp)
                             )
-                            Spacer(Modifier.width(4.dp))
+                            Spacer(Modifier.width(3.dp))
                             Text(
-                                text = if (isPaused) "استئناف" else "إيقاف مؤقت",
-                                style = MaterialTheme.typography.labelMedium,
+                                text = if (isPaused) "استئناف" else "مؤقت",
+                                style = MaterialTheme.typography.labelSmall,
                                 color = if (isPaused) StatusSuccess else CyberElectricCyan,
                                 maxLines = 1,
                                 softWrap = false
@@ -271,23 +302,23 @@ fun ChatLiveExecutionBubble(
                         OutlinedButton(
                             onClick = actions.onTakeOver,
                             modifier = Modifier
-                                .defaultMinSize(minWidth = 1.dp, minHeight = 36.dp)
-                                .minimumInteractiveComponentSize()
+                                .defaultMinSize(minWidth = 1.dp, minHeight = 32.dp)
+                                .height(32.dp)
                                 .testTag("user_takeover_button"),
                             shape = RoundedCornerShape(10.dp),
-                            border = BorderStroke(1.dp, CyberElectricCyan.copy(alpha = 0.7f)),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            border = BorderStroke(0.8.dp, CyberElectricCyan.copy(alpha = 0.55f)),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.PanTool,
                                 contentDescription = "أكمل بنفسي",
                                 tint = CyberElectricCyan,
-                                modifier = Modifier.size(14.dp)
+                                modifier = Modifier.size(12.dp)
                             )
-                            Spacer(Modifier.width(4.dp))
+                            Spacer(Modifier.width(3.dp))
                             Text(
                                 text = "أكمل بنفسي",
-                                style = MaterialTheme.typography.labelMedium,
+                                style = MaterialTheme.typography.labelSmall,
                                 color = CyberElectricCyan,
                                 maxLines = 1,
                                 softWrap = false
@@ -298,23 +329,23 @@ fun ChatLiveExecutionBubble(
                     OutlinedButton(
                         onClick = actions.onCancel,
                         modifier = Modifier
-                            .defaultMinSize(minWidth = 1.dp, minHeight = 36.dp)
-                            .minimumInteractiveComponentSize()
+                            .defaultMinSize(minWidth = 1.dp, minHeight = 32.dp)
+                            .height(32.dp)
                             .testTag("cancel_current_task_button"),
                         shape = RoundedCornerShape(10.dp),
-                        border = BorderStroke(1.dp, StatusCancelled.copy(alpha = 0.65f)),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                        border = BorderStroke(0.8.dp, StatusCancelled.copy(alpha = 0.45f)),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.Cancel,
                             contentDescription = "إلغاء المهمة الحالية",
                             tint = StatusCancelled,
-                            modifier = Modifier.size(14.dp)
+                            modifier = Modifier.size(12.dp)
                         )
-                        Spacer(Modifier.width(4.dp))
+                        Spacer(Modifier.width(3.dp))
                         Text(
-                            text = "إلغاء المهمة",
-                            style = MaterialTheme.typography.labelMedium,
+                            text = "إلغاء",
+                            style = MaterialTheme.typography.labelSmall,
                             color = StatusCancelled,
                             maxLines = 1,
                             softWrap = false
@@ -401,24 +432,24 @@ fun ChatMessageBubble(
     }
 
     val bubbleShape = if (isUser) {
-        RoundedCornerShape(topStart = 18.dp, topEnd = 4.dp, bottomStart = 18.dp, bottomEnd = 18.dp)
+        RoundedCornerShape(topStart = 20.dp, topEnd = 6.dp, bottomStart = 20.dp, bottomEnd = 20.dp)
     } else {
-        RoundedCornerShape(topStart = 4.dp, topEnd = 18.dp, bottomStart = 18.dp, bottomEnd = 18.dp)
+        RoundedCornerShape(topStart = 6.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 20.dp)
     }
 
     val containerColor = when {
-        isUser -> CyberElectricBlue.copy(alpha = 0.28f)
+        isUser -> CyberElectricBlue
         msgType == ChatMessageType.ERROR -> StatusCancelledContainer
         msgType == ChatMessageType.STOPPED -> StatusPendingContainer
         else -> CyberSurfaceNavy
     }
 
     val borderColor = when {
-        isUser -> CyberElectricCyan.copy(alpha = 0.7f)
-        msgType == ChatMessageType.ERROR -> StatusCancelled.copy(alpha = 0.7f)
-        msgType == ChatMessageType.STOPPED -> StatusPending.copy(alpha = 0.8f)
-        msgType == ChatMessageType.SCREEN_READ || msgType == ChatMessageType.PLAN -> CyberElectricCyan.copy(alpha = 0.55f)
-        else -> CyberBorderGlow
+        isUser -> Color.Transparent
+        msgType == ChatMessageType.ERROR -> StatusCancelled.copy(alpha = 0.6f)
+        msgType == ChatMessageType.STOPPED -> StatusPending.copy(alpha = 0.65f)
+        msgType == ChatMessageType.SCREEN_READ || msgType == ChatMessageType.PLAN -> CyberElectricCyan.copy(alpha = 0.45f)
+        else -> CyberBorderGlow.copy(alpha = 0.7f)
     }
 
     Row(
@@ -484,7 +515,7 @@ fun ChatMessageBubble(
                 Text(
                     text = message.text,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = CyberTextPrimary,
+                    color = if (isUser) Color.White else CyberTextPrimary,
                     softWrap = true
                 )
 
@@ -556,7 +587,7 @@ fun ChatMessageBubble(
                 Text(
                     text = timeStr,
                     style = MaterialTheme.typography.labelSmall,
-                    color = CyberTextSecondary
+                    color = if (isUser) Color.White.copy(alpha = 0.78f) else CyberTextSecondary
                 )
             }
         }

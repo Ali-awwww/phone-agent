@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -66,6 +67,12 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
         ScreenStateBridge.detachService()
     }
 
+    fun getActivePackageName(): String {
+        return rootInActiveWindow?.packageName?.toString()
+            ?: windows?.firstOrNull { it.isActive }?.root?.packageName?.toString()
+            ?: ""
+    }
+
     fun captureCurrentScreen(): ScreenSnapshot? {
         return captureDetailedScreenForGame()?.snapshot
     }
@@ -91,7 +98,11 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
             }
             val text = node.text?.toString()?.trim().orEmpty()
             val desc = node.contentDescription?.toString()?.trim().orEmpty()
-            val hint = node.hintText?.toString()?.trim().orEmpty()
+            val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                node.hintText?.toString()?.trim().orEmpty()
+            } else {
+                ""
+            }
 
             val combinedLower = "$text $desc $hint".lowercase()
             if (sensitiveKeywords.any { combinedLower.contains(it) }) {
@@ -243,7 +254,11 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
 
         val queryLower = hintOrLabel.trim().lowercase()
         val chosen = editableNodes.firstOrNull { node ->
-            val h = node.hintText?.toString()?.lowercase().orEmpty()
+            val h = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                node.hintText?.toString()?.lowercase().orEmpty()
+            } else {
+                ""
+            }
             val d = node.contentDescription?.toString()?.lowercase().orEmpty()
             val t = node.text?.toString()?.lowercase().orEmpty()
             queryLower.isNotEmpty() && (h.contains(queryLower) || d.contains(queryLower) || t.contains(queryLower))

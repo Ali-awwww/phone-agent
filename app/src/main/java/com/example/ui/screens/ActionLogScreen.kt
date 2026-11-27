@@ -112,14 +112,14 @@ fun ActionLogScreen(
                     FilterChip(
                         selected = state.selectedFilter == null,
                         onClick = { viewModel.setFilter(null) },
-                        shape = MaterialTheme.shapes.small,
+                        shape = androidx.compose.foundation.shape.CircleShape,
                         colors = FilterChipDefaults.filterChipColors(
                             containerColor = CyberSurfaceNavy,
                             labelColor = CyberTextPrimary,
                             selectedContainerColor = CyberElectricBlue,
                             selectedLabelColor = Color.White
                         ),
-                        border = BorderStroke(1.dp, if (state.selectedFilter == null) CyberElectricCyan else CyberBorderGlow),
+                        border = BorderStroke(0.8.dp, if (state.selectedFilter == null) CyberElectricCyan else CyberBorderGlow),
                         label = { Text("الكل") }
                     )
                 }
@@ -134,14 +134,14 @@ fun ActionLogScreen(
                     FilterChip(
                         selected = selected,
                         onClick = { viewModel.setFilter(status) },
-                        shape = MaterialTheme.shapes.small,
+                        shape = androidx.compose.foundation.shape.CircleShape,
                         colors = FilterChipDefaults.filterChipColors(
                             containerColor = CyberSurfaceNavy,
                             labelColor = CyberTextPrimary,
                             selectedContainerColor = CyberElectricBlue,
                             selectedLabelColor = Color.White
                         ),
-                        border = BorderStroke(1.dp, if (selected) CyberElectricCyan else CyberBorderGlow),
+                        border = BorderStroke(0.8.dp, if (selected) CyberElectricCyan else CyberBorderGlow),
                         label = { Text(status.labelAr) }
                     )
                 }
@@ -251,9 +251,9 @@ private fun ActionLogItemCard(
                 )
                 Spacer(Modifier.width(8.dp))
                 Surface(
-                    shape = MaterialTheme.shapes.small,
+                    shape = androidx.compose.foundation.shape.CircleShape,
                     color = bgColor,
-                    border = BorderStroke(1.dp, fgColor.copy(alpha = 0.6f))
+                    border = BorderStroke(0.8.dp, fgColor.copy(alpha = 0.55f))
                 ) {
                     Text(
                         text = status.labelAr,

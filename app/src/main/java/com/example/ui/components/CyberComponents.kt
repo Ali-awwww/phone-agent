@@ -17,10 +17,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.ChatBubbleOutline
+import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.PanTool
+import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.SportsEsports
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -36,25 +45,28 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.example.ui.theme.CyberBgDeep
 import com.example.ui.theme.CyberBorderGlow
 import com.example.ui.theme.CyberElectricBlue
 import com.example.ui.theme.CyberElectricCyan
-import com.example.ui.theme.CyberGridLine
 import com.example.ui.theme.CyberOnCyan
 import com.example.ui.theme.CyberSoftCyan
 import com.example.ui.theme.CyberSurfaceElevated
 import com.example.ui.theme.CyberSurfaceNavy
+import com.example.ui.theme.CyberSurfaceVariant
 import com.example.ui.theme.CyberTextPrimary
 import com.example.ui.theme.CyberTextSecondary
+import com.example.ui.theme.PhoneAgentTheme
+import com.example.ui.theme.StatusCancelled
 import com.example.ui.theme.StatusPending
 import com.example.ui.theme.StatusPendingContainer
 import com.example.ui.theme.StatusSuccess
@@ -68,77 +80,33 @@ fun CyberGeometricBackground(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(CyberBgDeep, Color(0xFF07122B), CyberBgDeep)
-                )
-            )
+            .background(CyberBgDeep)
     ) {
+        // توهّج أزرق سماوي هادئ للغاية بأسلوب iOS Light Mode
         Canvas(modifier = Modifier.fillMaxSize()) {
-            val step = 36.dp.toPx()
-            val gridAlpha = 0.065f
-
-            var x = 0f
-            while (x <= size.width) {
-                drawLine(
-                    color = CyberGridLine.copy(alpha = gridAlpha),
-                    start = Offset(x, 0f),
-                    end = Offset(x, size.height),
-                    strokeWidth = 1f
-                )
-                x += step
-            }
-
-            var y = 0f
-            while (y <= size.height) {
-                drawLine(
-                    color = CyberGridLine.copy(alpha = gridAlpha),
-                    start = Offset(0f, y),
-                    end = Offset(size.width, y),
-                    strokeWidth = 1f
-                )
-                y += step
-            }
-
-            // خطوط هندسية سايبرانية خفيفة في الزوايا
-            val bracketLen = 44.dp.toPx()
-            val margin = 14.dp.toPx()
-            val accentStroke = Stroke(width = 1.5.dp.toPx())
-
-            val topLeftPath = Path().apply {
-                moveTo(margin, margin + bracketLen)
-                lineTo(margin, margin)
-                lineTo(margin + bracketLen, margin)
-            }
-            drawPath(
-                path = topLeftPath,
-                color = CyberElectricCyan.copy(alpha = 0.25f),
-                style = accentStroke
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        CyberElectricBlue.copy(alpha = 0.06f),
+                        Color.Transparent
+                    ),
+                    center = Offset(size.width * 0.5f, 0f),
+                    radius = size.width * 0.95f
+                ),
+                center = Offset(size.width * 0.5f, 0f),
+                radius = size.width * 0.95f
             )
-
-            val bottomRightPath = Path().apply {
-                moveTo(size.width - margin, size.height - margin - bracketLen)
-                lineTo(size.width - margin, size.height - margin)
-                lineTo(size.width - margin - bracketLen, size.height - margin)
-            }
-            drawPath(
-                path = bottomRightPath,
-                color = CyberElectricBlue.copy(alpha = 0.35f),
-                style = accentStroke
-            )
-
-            // شكل هندسي قطري خفيف في الخلفية
-            drawLine(
-                color = CyberElectricCyan.copy(alpha = 0.08f),
-                start = Offset(size.width * 0.65f, 0f),
-                end = Offset(size.width, size.height * 0.32f),
-                strokeWidth = 1.2.dp.toPx()
-            )
-            drawLine(
-                color = CyberElectricBlue.copy(alpha = 0.1f),
-                start = Offset(0f, size.height * 0.72f),
-                end = Offset(size.width * 0.35f, size.height),
-                strokeWidth = 1.2.dp.toPx()
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        CyberElectricCyan.copy(alpha = 0.04f),
+                        Color.Transparent
+                    ),
+                    center = Offset(size.width * 0.88f, size.height * 0.85f),
+                    radius = size.width * 0.6f
+                ),
+                center = Offset(size.width * 0.88f, size.height * 0.85f),
+                radius = size.width * 0.6f
             )
         }
         content()
@@ -155,11 +123,11 @@ fun CyberPanelCard(
 ) {
     Card(
         modifier = modifier,
-        shape = MaterialTheme.shapes.medium,
+        shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(containerColor = containerColor),
         border = BorderStroke(
-            width = if (glowAccent) 1.5.dp else 1.dp,
-            color = if (glowAccent) CyberElectricCyan else borderColor
+            width = if (glowAccent) 1.dp else 0.75.dp,
+            color = if (glowAccent) CyberElectricCyan.copy(alpha = 0.55f) else borderColor.copy(alpha = 0.7f)
         ),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         content = content
@@ -173,29 +141,30 @@ fun AgentSafetyWarningBanner(
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 4.dp),
-        shape = MaterialTheme.shapes.small,
-        color = StatusPendingContainer,
-        border = BorderStroke(1.dp, StatusPending.copy(alpha = 0.75f))
+            .padding(horizontal = 14.dp, vertical = 6.dp)
+            .testTag("agent_safety_warning_banner"),
+        shape = RoundedCornerShape(14.dp),
+        color = Color(0xFFFFF5CC),
+        border = BorderStroke(0.85.dp, Color(0xFFE6C86E))
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Icon(
                 imageVector = Icons.Rounded.WarningAmber,
-                contentDescription = "تنبيه أمان",
-                tint = StatusPending,
+                contentDescription = "تحذير أمان",
+                tint = Color(0xFF7A5200),
                 modifier = Modifier.size(18.dp)
             )
             Text(
                 text = "تنبيه: الوكيل قد يخطئ أحياناً، راجع الأفعال الحساسة قبل الموافقة عليها",
                 style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold,
-                color = StatusPending,
+                fontWeight = FontWeight.Medium,
+                color = Color(0xFF5C4300),
                 maxLines = 2,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                overflow = TextOverflow.Ellipsis
             )
         }
     }
@@ -212,13 +181,11 @@ fun PlayWithAgentPromoCard(
         modifier = modifier
             .fillMaxWidth()
             .border(
-                width = 1.5.dp,
-                brush = Brush.horizontalGradient(
-                    colors = listOf(CyberElectricCyan, CyberElectricBlue, CyberSoftCyan)
-                ),
-                shape = MaterialTheme.shapes.medium
+                width = 0.85.dp,
+                color = CyberBorderGlow.copy(alpha = 0.75f),
+                shape = RoundedCornerShape(18.dp)
             ),
-        shape = MaterialTheme.shapes.medium,
+        shape = RoundedCornerShape(18.dp),
         color = Color.Transparent
     ) {
         Box(
@@ -226,13 +193,13 @@ fun PlayWithAgentPromoCard(
                 .background(
                     Brush.linearGradient(
                         colors = listOf(
-                            Color(0xFF0A244D),
-                            Color(0xFF0E1B3C),
-                            Color(0xFF082E52)
+                            Color(0xFFFFFFFF),
+                            Color(0xFFF5F9FF),
+                            Color(0xFFECF3FF)
                         )
                     )
                 )
-                .padding(if (compact) 12.dp else 16.dp)
+                .padding(if (compact) 14.dp else 16.dp)
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 10.dp)) {
                 Row(
@@ -242,20 +209,20 @@ fun PlayWithAgentPromoCard(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.weight(1f)
                     ) {
                         Surface(
-                            shape = MaterialTheme.shapes.small,
-                            color = CyberElectricCyan.copy(alpha = 0.16f),
-                            border = BorderStroke(1.dp, CyberElectricCyan.copy(alpha = 0.65f))
+                            shape = RoundedCornerShape(14.dp),
+                            color = CyberElectricCyan.copy(alpha = 0.18f),
+                            border = BorderStroke(0.8.dp, CyberElectricCyan.copy(alpha = 0.45f))
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.SportsEsports,
                                 contentDescription = "العب مع الوكيل",
                                 tint = CyberElectricCyan,
                                 modifier = Modifier
-                                    .padding(8.dp)
+                                    .padding(9.dp)
                                     .size(22.dp)
                             )
                         }
@@ -267,20 +234,20 @@ fun PlayWithAgentPromoCard(
                                 color = CyberTextPrimary
                             )
                             Text(
-                                text = "ميزة جديدة • اللعب فوق التطبيق كالإنسان مجاناً",
+                                text = "الحبّة العائمة وشريط الدردشة المصغّر",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = CyberSoftCyan
+                                color = CyberTextSecondary
                             )
                         }
                     }
 
                     Surface(
-                        shape = MaterialTheme.shapes.small,
+                        shape = CircleShape,
                         color = StatusSuccessContainer,
-                        border = BorderStroke(1.dp, StatusSuccess)
+                        border = BorderStroke(0.8.dp, StatusSuccess.copy(alpha = 0.65f))
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
@@ -288,7 +255,7 @@ fun PlayWithAgentPromoCard(
                                 imageVector = Icons.Rounded.AutoAwesome,
                                 contentDescription = null,
                                 tint = StatusSuccess,
-                                modifier = Modifier.size(14.dp)
+                                modifier = Modifier.size(13.dp)
                             )
                             Text(
                                 text = "مجانية",
@@ -302,7 +269,7 @@ fun PlayWithAgentPromoCard(
 
                 if (!compact) {
                     Text(
-                        text = "دع الوكيل يراقب شاشتك عبر إمكانية الوصول وينقر ويسحب خطوة بخطوة كالإنسان، مع أزرار تحكم عائمة (إيقاف فوري، إيقاف مؤقت، أكمل بنفسي، وتصغير). يحتاج الوكيل بضع ثوانٍ للتفكير قبل كل حركة.",
+                        text = "يراقب الوكيل التطبيق الخارجي عبر إمكانية الوصول مع كبسولة تحكم عائمة أنيقة وشريط دردشة مصغّر لتوجيهه فوراً دون مغادرة التطبيق.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = CyberTextSecondary
                     )
@@ -318,9 +285,9 @@ fun PlayWithAgentPromoCard(
                             .weight(1f)
                             .height(48.dp)
                             .testTag("take_over_play_button"),
-                        shape = MaterialTheme.shapes.small,
+                        shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = CyberElectricCyan,
+                            containerColor = CyberElectricBlue,
                             contentColor = CyberOnCyan
                         )
                     ) {
@@ -341,12 +308,223 @@ fun PlayWithAgentPromoCard(
                         modifier = Modifier
                             .height(48.dp)
                             .testTag("explain_play_feature_button"),
-                        shape = MaterialTheme.shapes.small,
-                        border = BorderStroke(1.dp, CyberElectricCyan.copy(alpha = 0.6f))
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, CyberBorderGlow)
                     ) {
                         Text(
-                            text = "التفاصيل",
+                            text = "التفاصيل والمعاينة",
                             color = CyberElectricCyan
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * معاينة مرئية مطابقة للتصميم الحقيقي للحبّة العائمة (Pill) بأسلوب iPhone.
+ */
+@Composable
+fun FloatingPillShowcaseCard(
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(32.dp),
+        color = Color(0xB8141418),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.18f))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Surface(
+                modifier = Modifier.size(34.dp),
+                shape = CircleShape,
+                color = Color.White.copy(alpha = 0.18f)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Rounded.ChatBubbleOutline,
+                        contentDescription = "فتح شريط الدردشة المصغّر",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            Text(
+                text = "يفكر في الحركة التالية…",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+
+            // 3 أزرار دائرية 40dp: إيقاف مؤقت، إيقاف أحمر مصمت، يد/تسليم
+            Surface(
+                modifier = Modifier.size(40.dp),
+                shape = CircleShape,
+                color = Color(0xFF3A3A3C)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Rounded.Pause,
+                        contentDescription = "إيقاف مؤقت",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            Surface(
+                modifier = Modifier.size(40.dp),
+                shape = CircleShape,
+                color = Color(0xFFFF3B30)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Rounded.Stop,
+                        contentDescription = "إيقاف",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            Surface(
+                modifier = Modifier.size(40.dp),
+                shape = CircleShape,
+                color = Color(0xFF3A3A3C)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Rounded.PanTool,
+                        contentDescription = "أكمل بنفسي",
+                        tint = Color.White,
+                        modifier = Modifier.size(17.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * معاينة مرئية مطابقة للتصميم الحقيقي لشريط الدردشة المصغّر (Mini Chat Bar) — يبقى داكناً شبه شفاف.
+ */
+@Composable
+fun MiniChatBarShowcaseCard(
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        color = Color(0xB8141418),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.2f))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "وكيل الهاتف",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFAEAEB2),
+                    fontWeight = FontWeight.Bold
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Surface(modifier = Modifier.size(28.dp), shape = CircleShape, color = Color(0xFF3A3A3C)) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Rounded.Pause, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                        }
+                    }
+                    Surface(modifier = Modifier.size(28.dp), shape = CircleShape, color = Color(0xFFFF3B30)) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Rounded.Stop, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                        }
+                    }
+                    Surface(modifier = Modifier.size(28.dp), shape = CircleShape, color = Color(0xFF3A3A3C)) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Rounded.PanTool, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
+                        }
+                    }
+                }
+            }
+
+            // الصف العلوي: رد الوكيل في فقاعة داكنة صغيرة محاذاة لليمين
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = Color(0xFF2C2C2E)
+            ) {
+                Text(
+                    text = "سأنفّذ خطوة «ابدأ الآن» ثم أواصل اللعب.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
+                )
+            }
+
+            // الصف السفلي باتجاه RTL: حقل نص مستدير داكن + ميكروفون دائري + إرسال أزرق #007AFF
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(20.dp),
+                    color = Color(0xFF1C1C1E),
+                    border = BorderStroke(0.8.dp, Color.White.copy(alpha = 0.15f))
+                ) {
+                    Text(
+                        text = "اكتب أمرك للوكيل…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFAEAEB2),
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                    )
+                }
+
+                Surface(
+                    modifier = Modifier.size(38.dp),
+                    shape = CircleShape,
+                    color = Color(0xFF3A3A3C)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Rounded.Mic,
+                            contentDescription = "تحدث بالصوت",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
+                Surface(
+                    modifier = Modifier.size(38.dp),
+                    shape = CircleShape,
+                    color = Color(0xFF007AFF)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.Send,
+                            contentDescription = "إرسال",
+                            tint = Color.White,
+                            modifier = Modifier.size(17.dp)
                         )
                     }
                 }
@@ -364,6 +542,7 @@ fun PlayFeatureInfoDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = CyberSurfaceNavy,
+        shape = RoundedCornerShape(24.dp),
         titleContentColor = CyberElectricCyan,
         textContentColor = CyberTextPrimary,
         title = {
@@ -377,46 +556,61 @@ fun PlayFeatureInfoDialog(
                     tint = CyberElectricCyan
                 )
                 Text(
-                    text = "العب مع الوكيل — ميزة جديدة",
+                    text = "العب مع الوكيل — iOS v1.0.8",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
                 )
             }
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 Text(
-                    text = "محرك لعب عام ومجاني بالكامل لا يرتبط بلعبة معينة: يقرأ الوكيل الشاشة الحقيقية عبر إمكانية الوصول، ويتفاعل معها كالإنسان عبر النقر والسحب والتمرير دون تخمين أو اختراع أزرار.",
-                    style = MaterialTheme.typography.bodyMedium,
+                    text = "تظهر الحبّة العائمة فقط عند العمل فوق التطبيق الخارجي وتختفي داخل وكيل الهاتف. اضغط على جسم الحبّة لطيّها إلى فقاعة دائرية، أو افتح شريط الدردشة المصغّر لتوجيه الوكيل فوراً.",
+                    style = MaterialTheme.typography.bodySmall,
                     color = CyberTextPrimary
                 )
-                Surface(
-                    shape = MaterialTheme.shapes.small,
-                    color = CyberSurfaceElevated,
-                    border = BorderStroke(1.dp, CyberBorderGlow)
+
+                Text(
+                    text = "معاينة الحبّة العائمة (Pill):",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = CyberSoftCyan
+                )
+                FloatingPillShowcaseCard()
+
+                Text(
+                    text = "معاينة شريط الدردشة المصغّر (Mini Chat Bar):",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = CyberSoftCyan
+                )
+                MiniChatBarShowcaseCard()
+
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = CyberBgDeep,
+                border = BorderStroke(0.8.dp, CyberBorderGlow)
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = "• جميع ميزات «وكيل الهاتف» بما فيها اللعب فوق التطبيقات مجانية 100% للجميع.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = CyberSoftCyan
-                        )
-                        Text(
-                            text = "• الوكيل ليس لحظياً: يحتاج بضع ثوانٍ للتفكير والتحقق من الشاشة في كل خطوة.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = CyberTextSecondary
-                        )
-                        Text(
-                            text = "• عند منح إذن الظهور فوق التطبيقات ستظهر لك 4 أزرار عائمة: إيقاف فوري، إيقاف مؤقت/استئناف، «أكمل بنفسي»، وتصغير.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = CyberTextSecondary
-                        )
-                    }
+                    Text(
+                        text = "• الحبّة تحتوي 3 أزرار دائرية (إيقاف مؤقت، إيقاف أحمر، أكمل بنفسي) وتُطوى إلى فقاعة 56dp.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = CyberTextSecondary
+                    )
+                    Text(
+                        text = "• الضغط على «أكمل بنفسي» يسلّمك التحكم ويطويها إلى فقاعة مع زر «استئناف الوكيل» دون إنهاء المهمة.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = CyberTextSecondary
+                    )
                 }
             }
+        }
         },
         confirmButton = {
             Button(
@@ -424,8 +618,9 @@ fun PlayFeatureInfoDialog(
                 modifier = Modifier
                     .height(48.dp)
                     .testTag("start_gameplay_loop_button"),
+                shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = CyberElectricCyan,
+                    containerColor = CyberElectricBlue,
                     contentColor = CyberOnCyan
                 )
             ) {
@@ -438,6 +633,7 @@ fun PlayFeatureInfoDialog(
                     OutlinedButton(
                         onClick = onOpenPermissions,
                         modifier = Modifier.height(48.dp),
+                        shape = RoundedCornerShape(14.dp),
                         border = BorderStroke(1.dp, CyberBorderGlow)
                     ) {
                         Text("الأذونات", color = CyberElectricCyan)
@@ -454,4 +650,18 @@ fun PlayFeatureInfoDialog(
     )
 }
 
-
+@Preview(showBackground = true, backgroundColor = 0xFFF2F2F7, locale = "ar")
+@Composable
+private fun FloatingControlsShowcasePreview() {
+    PhoneAgentTheme {
+        Column(
+            modifier = Modifier
+                .background(CyberBgDeep)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            FloatingPillShowcaseCard()
+            MiniChatBarShowcaseCard()
+        }
+    }
+}

@@ -174,9 +174,9 @@ fun CyberPlanCard(
                     .height(48.dp)
                     .testTag("execute_plan_button"),
                 contentPadding = PaddingValues(horizontal = 16.dp),
-                shape = MaterialTheme.shapes.small,
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = CyberElectricCyan,
+                    containerColor = CyberElectricBlue,
                     contentColor = CyberOnCyan
                 )
             ) {
@@ -204,7 +204,7 @@ fun CyberPlanCard(
                     modifier = Modifier
                         .weight(1f)
                         .height(48.dp),
-                    shape = MaterialTheme.shapes.small,
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
                     border = BorderStroke(1.dp, CyberBorderGlow),
                     contentPadding = PaddingValues(horizontal = 12.dp)
                 ) {
@@ -224,7 +224,7 @@ fun CyberPlanCard(
                         .weight(1f)
                         .height(48.dp)
                         .testTag("plan_cancel_task_button"),
-                    shape = MaterialTheme.shapes.small,
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
                     border = BorderStroke(1.dp, StatusCancelled),
                     contentPadding = PaddingValues(horizontal = 12.dp),
                     colors = ButtonDefaults.outlinedButtonColors(

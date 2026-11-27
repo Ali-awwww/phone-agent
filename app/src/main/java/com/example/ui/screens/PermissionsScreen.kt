@@ -67,8 +67,10 @@ import com.example.ui.theme.CyberBorderGlow
 import com.example.ui.theme.CyberElectricCyan
 import com.example.ui.theme.CyberOnCyan
 import com.example.ui.theme.CyberSurfaceElevated
+import com.example.ui.theme.CyberSurfaceNavy
 import com.example.ui.theme.CyberTextPrimary
 import com.example.ui.theme.CyberTextSecondary
+import com.example.ui.theme.StatusCyanInfoContainer
 import com.example.ui.theme.StatusPending
 import com.example.ui.theme.StatusPendingContainer
 import com.example.ui.theme.StatusSuccess
@@ -152,8 +154,8 @@ fun PermissionsScreen(
 
             item {
                 CyberPanelCard(
-                    containerColor = CyberSurfaceElevated,
-                    borderColor = CyberElectricCyan
+                    containerColor = CyberSurfaceNavy,
+                    borderColor = CyberElectricCyan.copy(alpha = 0.45f)
                 ) {
                     Column(
                         modifier = Modifier
@@ -197,9 +199,9 @@ fun PermissionsScreen(
                                 .fillMaxWidth()
                                 .height(48.dp)
                                 .testTag("our_apps_button"),
-                            shape = MaterialTheme.shapes.small,
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = CyberElectricCyan,
+                                containerColor = com.example.ui.theme.CyberElectricBlue,
                                 contentColor = CyberOnCyan
                             )
                         ) {
@@ -220,8 +222,8 @@ fun PermissionsScreen(
 
             item {
                 CyberPanelCard(
-                    containerColor = CyberSurfaceElevated,
-                    borderColor = CyberElectricCyan
+                    containerColor = StatusCyanInfoContainer,
+                    borderColor = CyberElectricCyan.copy(alpha = 0.4f)
                 ) {
                     Row(
                         modifier = Modifier.padding(14.dp),
@@ -342,11 +344,11 @@ private fun PermissionItemCard(
                 }
 
                 Surface(
-                    shape = MaterialTheme.shapes.small,
+                    shape = androidx.compose.foundation.shape.CircleShape,
                     color = if (item.isGranted) StatusSuccessContainer else StatusPendingContainer,
                     border = BorderStroke(
-                        1.dp,
-                        if (item.isGranted) StatusSuccess else StatusPending
+                        0.8.dp,
+                        if (item.isGranted) StatusSuccess.copy(alpha = 0.7f) else StatusPending.copy(alpha = 0.7f)
                     )
                 ) {
                     Row(
@@ -389,9 +391,9 @@ private fun PermissionItemCard(
                         .fillMaxWidth()
                         .height(50.dp)
                         .testTag("enable_perm_${item.type.name}"),
-                    shape = MaterialTheme.shapes.small,
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = CyberElectricCyan,
+                        containerColor = com.example.ui.theme.CyberElectricBlue,
                         contentColor = CyberOnCyan
                     )
                 ) {
@@ -406,7 +408,7 @@ private fun PermissionItemCard(
                         .fillMaxWidth()
                         .height(48.dp)
                         .testTag("settings_perm_${item.type.name}"),
-                    shape = MaterialTheme.shapes.small,
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
                     border = BorderStroke(1.dp, CyberBorderGlow)
                 ) {
                     Text(stringResource(R.string.permission_settings_button), color = CyberElectricCyan)

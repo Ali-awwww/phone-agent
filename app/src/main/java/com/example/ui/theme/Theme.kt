@@ -1,17 +1,17 @@
 package com.example.ui.theme
 
-import androidx.compose.foundation.shape.CutCornerShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
-import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
-private val CyberDarkColorScheme = darkColorScheme(
+private val IosLightColorScheme = lightColorScheme(
     primary = CyberElectricCyan,
     onPrimary = CyberOnCyan,
-    primaryContainer = CyberSurfaceElevated,
+    primaryContainer = ColorTokens.BlueContainer,
     onPrimaryContainer = CyberSoftCyan,
     secondary = CyberElectricBlue,
     onSecondary = CyberOnBlue,
@@ -19,33 +19,33 @@ private val CyberDarkColorScheme = darkColorScheme(
     onSecondaryContainer = CyberTextPrimary,
     tertiary = CyberSoftCyan,
     onTertiary = CyberOnCyan,
-    tertiaryContainer = CyberSurfaceVariant,
+    tertiaryContainer = CyberSurfaceElevated,
     onTertiaryContainer = CyberTextPrimary,
     background = CyberBgDeep,
     onBackground = CyberTextPrimary,
     surface = CyberSurfaceNavy,
     onSurface = CyberTextPrimary,
-    surfaceVariant = CyberSurfaceVariant,
+    surfaceVariant = CyberSurfaceElevated,
     onSurfaceVariant = CyberTextSecondary,
     outline = CyberBorderGlow,
-    outlineVariant = CyberSurfaceElevated,
+    outlineVariant = CyberSurfaceVariant,
     error = StatusCancelled,
-    onError = CyberBgDeep,
+    onError = Color.White,
     errorContainer = StatusCancelledContainer,
     onErrorContainer = StatusCancelled
 )
 
 private object ColorTokens {
-    val BlueContainer = androidx.compose.ui.graphics.Color(0xFF102A5C)
+    val BlueContainer = Color(0xFFE5F0FF)
 }
 
-// زوايا هندسية حادة واضحة الهوية السايبرانية
+// زوايا iPhone الدائرية الناعمة والمتناسقة (16–20dp للبطاقات)
 val PhoneAgentShapes = Shapes(
-    extraSmall = RoundedCornerShape(2.dp),
-    small = RoundedCornerShape(4.dp),
-    medium = CutCornerShape(topStart = 10.dp, bottomEnd = 10.dp, topEnd = 2.dp, bottomStart = 2.dp),
-    large = CutCornerShape(topStart = 14.dp, bottomEnd = 14.dp, topEnd = 3.dp, bottomStart = 3.dp),
-    extraLarge = CutCornerShape(topStart = 18.dp, bottomEnd = 18.dp, topEnd = 4.dp, bottomStart = 4.dp)
+    extraSmall = RoundedCornerShape(8.dp),
+    small = RoundedCornerShape(12.dp),
+    medium = RoundedCornerShape(18.dp),
+    large = RoundedCornerShape(20.dp),
+    extraLarge = RoundedCornerShape(28.dp)
 )
 
 @Composable
@@ -53,7 +53,7 @@ fun PhoneAgentTheme(
     content: @Composable () -> Unit
 ) {
     MaterialTheme(
-        colorScheme = CyberDarkColorScheme,
+        colorScheme = IosLightColorScheme,
         typography = AppTypography,
         shapes = PhoneAgentShapes,
         content = content

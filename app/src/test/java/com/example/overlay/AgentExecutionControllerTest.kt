@@ -107,4 +107,28 @@ class AgentExecutionControllerTest {
         assertTrue(enriched.contains("غير متأكد"))
         assertEquals(2, AgentPromptRules.enrichScreenReadLines("شاشة").size)
     }
+
+    @Test
+    fun `handover pauses and marks handedOver then resume clears both without losing state`() = runBlocking {
+        val controller = AgentExecutionController()
+        controller.setHandedOver(true)
+
+        assertTrue(controller.isHandedOver.value)
+        assertTrue(controller.isPaused.value)
+
+        var resumed = false
+        val job = async {
+            controller.awaitIfPaused()
+            resumed = true
+        }
+
+        delay(70L)
+        assertFalse("Execution must remain paused during user handover", resumed)
+
+        controller.setHandedOver(false)
+        job.await()
+        assertTrue("Execution must resume once user taps Resume Agent", resumed)
+        assertFalse(controller.isHandedOver.value)
+        assertFalse(controller.isPaused.value)
+    }
 }

@@ -949,6 +949,102 @@ class GeminiRepository internal constructor(
         }
     }
 
+    data class MiniChatDirectiveResult(
+        val shouldAct: Boolean,
+        val action: String,
+        val targetText: String,
+        val inputText: String,
+        val x: Float,
+        val y: Float,
+        val endX: Float,
+        val endY: Float,
+        val continuePlaying: Boolean,
+        val replyOneLineAr: String
+    )
+
+    suspend fun analyzeMiniChatDirective(
+        userCommand: String,
+        screenSummary: String,
+        history: String = "",
+        wasGameplayRunning: Boolean = false
+    ): ModelResponseMetadata<MiniChatDirectiveResult> {
+        val prompt = buildString {
+            if (history.isNotBlank()) {
+                appendLine("سجل المحادثة السابق:")
+                appendLine(history)
+                appendLine()
+            }
+            appendLine("أنت تتحكم حالياً في الشاشة التالية عبر شريط الدردشة المصغّر:")
+            appendLine(screenSummary.ifBlank { "لا توجد تفاصيل شاشة حالياً." })
+            appendLine()
+            appendLine("توجيه المستخدم الفوري: $userCommand")
+            appendLine("هل كان وضع اللعب التلقائي يعمل؟ $wasGameplayRunning")
+            appendLine("أجب بصيغة JSON فقط بدون شرح خارجي:")
+            append("""{"shouldAct":true,"action":"TAP_TEXT|TAP_XY|SWIPE|SCROLL|INPUT_TEXT|BACK|NONE","text":"النص الدقيق على الشاشة إن وجد","inputText":"النص المراد كتابته عند INPUT_TEXT","x":0.5,"y":0.5,"endX":0.5,"endY":0.2,"continuePlaying":$wasGameplayRunning,"replyOneLineAr":"رد عربي قصير جداً في سطر واحد"}""")
+        }
+
+        val chain = getModelChainForTier(ModelRouteTier.FLASH)
+        val result = withModelChainResilience(
+            timeoutMs = 30_000L,
+            candidates = listOf(
+                ModelCallCandidate(chain[0]) { modelClient.generateGeneralArabicText(prompt) },
+                ModelCallCandidate(chain[1]) { modelClient.generateLiteGeneralArabicText(prompt) },
+                ModelCallCandidate(chain[2]) { modelClient.generateGeneralArabicTextThird(prompt) }
+            )
+        )
+        val parsed = parseMiniChatDirectiveJson(result.value)
+        return ModelResponseMetadata(
+            value = parsed,
+            tier = ModelRouteTier.FLASH,
+            intendedModel = chain[0],
+            modelUsed = result.modelUsed,
+            usedFallback = result.usedFallback
+        )
+    }
+
+    internal fun parseMiniChatDirectiveJson(raw: String): MiniChatDirectiveResult {
+        val cleaned = raw.trim()
+            .removePrefix("```json")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
+        val start = cleaned.indexOf('{')
+        val end = cleaned.lastIndexOf('}')
+        if (start >= 0 && end > start) {
+            runCatching {
+                val obj = JSONObject(cleaned.substring(start, end + 1))
+                val reply = obj.optString("replyOneLineAr", "").trim()
+                    .replace('\n', ' ')
+                    .take(120)
+                return MiniChatDirectiveResult(
+                    shouldAct = obj.optBoolean("shouldAct", false),
+                    action = obj.optString("action", "NONE").uppercase(),
+                    targetText = obj.optString("text", ""),
+                    inputText = obj.optString("inputText", ""),
+                    x = obj.optDouble("x", 0.5).toFloat().coerceIn(0.02f, 0.98f),
+                    y = obj.optDouble("y", 0.5).toFloat().coerceIn(0.02f, 0.98f),
+                    endX = obj.optDouble("endX", 0.5).toFloat().coerceIn(0.02f, 0.98f),
+                    endY = obj.optDouble("endY", 0.2).toFloat().coerceIn(0.02f, 0.98f),
+                    continuePlaying = obj.optBoolean("continuePlaying", false),
+                    replyOneLineAr = reply.ifBlank { "تم استلام توجيهك وتنفيذه على الشاشة." }
+                )
+            }
+        }
+        val singleLine = cleaned.replace('\n', ' ').trim().take(120)
+        return MiniChatDirectiveResult(
+            shouldAct = false,
+            action = "NONE",
+            targetText = "",
+            inputText = "",
+            x = 0.5f,
+            y = 0.5f,
+            endX = 0.5f,
+            endY = 0.2f,
+            continuePlaying = false,
+            replyOneLineAr = singleLine.ifBlank { "تم تنفيذ طلبك." }
+        )
+    }
+
     suspend fun pingModelTest(
         onStatusUpdate: (suspend (String) -> Unit)? = null
     ): Pair<Boolean, String> {

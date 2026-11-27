@@ -1,5 +1,6 @@
 package com.example.game
 
+import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.util.Log
 import com.example.data.ai.GeminiRepository
@@ -12,6 +13,7 @@ import com.example.executor.ModelRouteTier
 import com.example.overlay.AgentExecutionController
 import com.example.overlay.AgentFloatingControlManager
 import com.example.overlay.FloatingControlCallbacks
+import com.example.permissions.PermissionHelper
 import com.example.policy.AgentPolicy
 import com.example.policy.AgentPromptRules
 import com.example.service.GameScreenObservation
@@ -19,11 +21,21 @@ import com.example.service.PhoneAgentAccessibilityService
 import com.example.service.ScreenStateBridge
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val TAG = "GeneralGameEngine"
+
+object ForegroundAppPolicy {
+    fun shouldShowFloatingOverlay(foregroundPackage: String, agentPackageName: String): Boolean {
+        return foregroundPackage.isNotBlank() && foregroundPackage != agentPackageName
+    }
+}
 
 data class GameLoopResult(
     val completedNaturally: Boolean,
@@ -35,7 +47,7 @@ data class GameLoopResult(
  * محرك لعب عام غير مرتبط بأي لعبة بعينها:
  * - يتحقق من الشاشة الحقيقية عبر شجرة إمكانية الوصول دون اختراع عناصر.
  * - يستخدم التطبيق كالإنسان (نقر، سحب، تمرير، انتظار، رجوع) ويتوقف فوراً عند طلب المستخدم.
- * - يعرض أزرار التحكم العائمة فوق التطبيق (إيقاف فوري، إيقاف مؤقت/استئناف، أكمل بنفسي، تصغير).
+ * - يعرض الحبّة العائمة فقط عندما يكون التطبيق المستهدف الخارجي في المقدمة، ويخفيها تماماً داخل تطبيق «وكيل الهاتف».
  */
 class GeneralGameEngine(
     private val context: Context,
@@ -46,25 +58,73 @@ class GeneralGameEngine(
     private val floatingControlManager: AgentFloatingControlManager = AgentFloatingControlManager(context)
 ) {
 
+    @Volatile
+    private var currentOverlayStatusAr: String = "يفكر في الحركة التالية"
+
+    suspend fun resolveForegroundPackage(service: PhoneAgentAccessibilityService): String {
+        val fromAccessibility = withContext(Dispatchers.Main) {
+            service.getActivePackageName()
+        }
+        if (fromAccessibility.isNotBlank()) return fromAccessibility
+
+        if (PermissionHelper.isUsageAccessGranted(context)) {
+            return runCatching {
+                val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
+                    ?: return@runCatching ""
+                val end = System.currentTimeMillis()
+                val start = end - 15_000L
+                val stats = usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, start, end)
+                    ?: return@runCatching ""
+                stats.maxByOrNull { it.lastTimeUsed }?.packageName.orEmpty()
+            }.getOrDefault("")
+        }
+        return ""
+    }
+
+    private suspend fun syncFloatingOverlayForCurrentForeground(
+        service: PhoneAgentAccessibilityService,
+        callbacks: FloatingControlCallbacks
+    ): Boolean {
+        val foregroundPkg = resolveForegroundPackage(service)
+        val isExternal = ForegroundAppPolicy.shouldShowFloatingOverlay(foregroundPkg, context.packageName)
+        if (isExternal) {
+            floatingControlManager.show(
+                initialStatusAr = currentOverlayStatusAr,
+                isPaused = executionController.isPaused.value,
+                callbacks = callbacks
+            )
+            floatingControlManager.setHostVisible(true)
+        } else {
+            floatingControlManager.setHostVisible(false)
+        }
+        return isExternal
+    }
+
     suspend fun runObserveAndActLoop(
         goalAr: String,
         maxCycles: Int = 10,
         onCycleUpdate: suspend (String) -> Unit,
         callbacks: FloatingControlCallbacks
-    ): GameLoopResult {
+    ): GameLoopResult = coroutineScope {
         val service = ScreenStateBridge.getService()
-            ?: return GameLoopResult(
+            ?: return@coroutineScope GameLoopResult(
                 completedNaturally = false,
                 stepsExecuted = 0,
                 summaryAr = "يتطلب وضع «العب مع الوكيل» تفعيل خدمة إمكانية الوصول أولاً ليتمكن الوكيل من مشاهدة الشاشة وتنفيذ اللمس والسحب."
             )
 
         executionController.reset()
-        floatingControlManager.show(
-            initialStatusAr = "الوكيل يلعب • يحتاج ثوانٍ لكل خطوة",
-            isPaused = false,
-            callbacks = callbacks
-        )
+        currentOverlayStatusAr = "يفكر في الحركة التالية"
+        syncFloatingOverlayForCurrentForeground(service, callbacks)
+
+        val visibilityWatcherJob = launch {
+            while (isActive) {
+                runCatching {
+                    syncFloatingOverlayForCurrentForeground(service, callbacks)
+                }
+                delay(300L)
+            }
+        }
 
         val recentActions = mutableListOf<String>()
         var executedCount = 0
@@ -74,8 +134,16 @@ class GeneralGameEngine(
                 currentCoroutineContext().ensureActive()
                 executionController.awaitIfPaused()
 
+                val isExternal = syncFloatingOverlayForCurrentForeground(service, callbacks)
+                if (!isExternal) {
+                    onCycleUpdate("أنت داخل «وكيل الهاتف» — تم إخفاء الحبّة العائمة، عد إلى التطبيق المستهدف للمتابعة.")
+                    executionController.delayRespectingPause(650L)
+                    continue
+                }
+
+                currentOverlayStatusAr = "يفكر في الحركة التالية"
                 floatingControlManager.updateStatus(
-                    statusAr = "دورة $cycle/$maxCycles: قراءة الشاشة الحقيقية (ثوانٍ للتفكير)...",
+                    statusAr = currentOverlayStatusAr,
                     isPaused = executionController.isPaused.value
                 )
 
@@ -88,6 +156,12 @@ class GeneralGameEngine(
                     continue
                 }
 
+                if (!ForegroundAppPolicy.shouldShowFloatingOverlay(observation.snapshot.packageName, context.packageName)) {
+                    floatingControlManager.setHostVisible(false)
+                    executionController.delayRespectingPause(650L)
+                    continue
+                }
+
                 if (observation.snapshot.hasSensitiveSecurityField) {
                     val safeMsg = "تم إيقاف محرك اللعب فوراً لحمايتك بعد رصد شاشة حساسة (كلمة مرور/دفع/بصمة)."
                     actionLogRepository.logAction(
@@ -96,12 +170,13 @@ class GeneralGameEngine(
                         status = ActionStatus.CANCELLED,
                         actionType = "GAME_SAFETY_STOP"
                     )
-                    return GameLoopResult(false, executedCount, safeMsg)
+                    return@coroutineScope GameLoopResult(false, executedCount, safeMsg)
                 }
 
                 executionController.awaitIfPaused()
+                currentOverlayStatusAr = "يفكر في الحركة التالية"
                 floatingControlManager.updateStatus(
-                    statusAr = "دورة $cycle/$maxCycles: الوكيل يفكر في الحركة التالية (ثوانٍ)...",
+                    statusAr = currentOverlayStatusAr,
                     isPaused = executionController.isPaused.value
                 )
 
@@ -118,7 +193,7 @@ class GeneralGameEngine(
                 )
                 if (policyCheck != null) {
                     val blockedMsg = "توقف اللعب وفق سياسة الأمان (${policyCheck.titleAr})."
-                    return GameLoopResult(false, executedCount, blockedMsg)
+                    return@coroutineScope GameLoopResult(false, executedCount, blockedMsg)
                 }
 
                 if (decision.action == GameGestureAction.DONE) {
@@ -131,12 +206,18 @@ class GeneralGameEngine(
                         status = ActionStatus.SUCCESS,
                         actionType = "GAME_LOOP_DONE"
                     )
-                    return GameLoopResult(true, executedCount, doneMsg)
+                    return@coroutineScope GameLoopResult(true, executedCount, doneMsg)
                 }
 
                 executionController.awaitIfPaused()
+                if (!syncFloatingOverlayForCurrentForeground(service, callbacks)) {
+                    executionController.delayRespectingPause(500L)
+                    continue
+                }
+
+                currentOverlayStatusAr = decision.reasonAr.ifBlank { "ينفّذ الحركة التالية" }
                 floatingControlManager.updateStatus(
-                    statusAr = "دورة $cycle/$maxCycles: ${decision.reasonAr.ifBlank { "تنفيذ الحركة" }}",
+                    statusAr = currentOverlayStatusAr,
                     isPaused = executionController.isPaused.value
                 )
 
@@ -161,11 +242,40 @@ class GeneralGameEngine(
                 status = ActionStatus.SUCCESS,
                 actionType = "GAME_LOOP_COMPLETE"
             )
-            return GameLoopResult(true, executedCount, endSummary)
+            return@coroutineScope GameLoopResult(true, executedCount, endSummary)
         } catch (e: CancellationException) {
             throw e
         } finally {
+            visibilityWatcherJob.cancel()
             floatingControlManager.dismiss()
+        }
+    }
+
+    suspend fun executeMiniChatDirectiveAction(
+        service: PhoneAgentAccessibilityService,
+        directive: GeminiRepository.MiniChatDirectiveResult
+    ): Boolean {
+        if (!directive.shouldAct) return false
+        return when (directive.action) {
+            "TAP_TEXT" -> {
+                val clicked = withContext(Dispatchers.Main) {
+                    directive.targetText.isNotBlank() && service.findAndClickHumanLike(directive.targetText)
+                }
+                if (clicked) true else service.performTapAt(directive.x, directive.y)
+            }
+            "TAP_XY" -> service.performTapAt(directive.x, directive.y)
+            "SWIPE" -> service.performSwipe(directive.x, directive.y, directive.endX, directive.endY)
+            "SCROLL" -> withContext(Dispatchers.Main) {
+                service.scrollForward()
+            } || service.performSwipe(0.5f, 0.78f, 0.5f, 0.28f)
+            "INPUT_TEXT" -> withContext(Dispatchers.Main) {
+                val textToType = directive.inputText.ifBlank { directive.targetText }
+                textToType.isNotBlank() && service.findAndInputText(directive.targetText, textToType)
+            }
+            "BACK" -> withContext(Dispatchers.Main) {
+                service.navigateBack()
+            }
+            else -> false
         }
     }
 

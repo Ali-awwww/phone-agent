@@ -192,10 +192,10 @@ fun PhoneAgentApp(
                 bottomBar = {
                     if (!useRail) {
                         Surface(
-                            color = CyberSurfaceNavy,
-                            border = BorderStroke(1.dp, CyberBorderGlow)
+                            color = Color(0xF5F9F9FB),
+                            border = BorderStroke(0.5.dp, CyberBorderGlow.copy(alpha = 0.75f))
                         ) {
-                            NavigationBar(containerColor = CyberSurfaceNavy) {
+                            NavigationBar(containerColor = Color.Transparent) {
                                 destinations.forEach { dest ->
                                     val selected = currentDestination?.hierarchy?.any { it.route == dest.route } == true
                                     val label = stringResource(dest.labelRes)
@@ -210,9 +210,9 @@ fun PhoneAgentApp(
                                         },
                                         label = { Text(label) },
                                         colors = NavigationBarItemDefaults.colors(
-                                            selectedIconColor = CyberBgDeep,
+                                            selectedIconColor = CyberElectricCyan,
                                             selectedTextColor = CyberElectricCyan,
-                                            indicatorColor = CyberElectricCyan,
+                                            indicatorColor = CyberElectricCyan.copy(alpha = 0.12f),
                                             unselectedIconColor = CyberTextSecondary,
                                             unselectedTextColor = CyberTextSecondary
                                         ),
@@ -230,7 +230,7 @@ fun PhoneAgentApp(
                         .padding(innerPadding)
                 ) {
                     if (useRail) {
-                        NavigationRail(containerColor = CyberSurfaceNavy) {
+                        NavigationRail(containerColor = Color(0xF5F9F9FB)) {
                             destinations.forEach { dest ->
                                 val selected = currentDestination?.hierarchy?.any { it.route == dest.route } == true
                                 val label = stringResource(dest.labelRes)
@@ -245,9 +245,9 @@ fun PhoneAgentApp(
                                     },
                                     label = { Text(label) },
                                     colors = NavigationRailItemDefaults.colors(
-                                        selectedIconColor = CyberBgDeep,
+                                        selectedIconColor = CyberElectricCyan,
                                         selectedTextColor = CyberElectricCyan,
-                                        indicatorColor = CyberElectricCyan,
+                                        indicatorColor = CyberElectricCyan.copy(alpha = 0.12f),
                                         unselectedIconColor = CyberTextSecondary,
                                         unselectedTextColor = CyberTextSecondary
                                     ),
@@ -258,9 +258,9 @@ fun PhoneAgentApp(
                     }
 
                     Column(modifier = Modifier.fillMaxSize()) {
-                        // تنبيه ثابت في كل الشاشات الأربع
+                        // شريط التحذير الأصفر ثابت وظاهر دائماً في كل الشاشات الأربع (بما فيها شاشة الدردشة)
                         AgentSafetyWarningBanner()
-                        HorizontalDivider(color = CyberSurfaceElevated, thickness = 1.dp)
+                        HorizontalDivider(color = CyberBorderGlow.copy(alpha = 0.45f), thickness = 0.5.dp)
 
                         NavHost(
                             navController = navController,

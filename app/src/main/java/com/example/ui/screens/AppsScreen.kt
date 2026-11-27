@@ -139,14 +139,14 @@ fun AppsScreen(
                     selected = state.showHiddenApps,
                     onClick = { viewModel.toggleShowHidden() },
                     modifier = Modifier.testTag("toggle_hidden_apps"),
-                    shape = MaterialTheme.shapes.small,
+                    shape = androidx.compose.foundation.shape.CircleShape,
                     colors = FilterChipDefaults.filterChipColors(
                         containerColor = CyberSurfaceNavy,
                         labelColor = CyberTextPrimary,
                         selectedContainerColor = CyberElectricBlue,
                         selectedLabelColor = Color.White
                     ),
-                    border = BorderStroke(1.dp, if (state.showHiddenApps) CyberElectricCyan else CyberBorderGlow),
+                    border = BorderStroke(0.8.dp, if (state.showHiddenApps) CyberElectricCyan else CyberBorderGlow),
                     leadingIcon = {
                         Icon(
                             imageVector = if (state.showHiddenApps) Icons.Rounded.Visibility else Icons.Rounded.VisibilityOff,
@@ -173,14 +173,14 @@ fun AppsScreen(
                 leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, tint = CyberElectricCyan) },
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = CyberElectricCyan,
-                    unfocusedBorderColor = CyberBorderGlow,
+                    unfocusedBorderColor = CyberBorderGlow.copy(alpha = 0.7f),
                     focusedContainerColor = CyberSurfaceNavy,
                     unfocusedContainerColor = CyberSurfaceNavy,
                     focusedTextColor = CyberTextPrimary,
                     unfocusedTextColor = CyberTextPrimary
                 ),
                 singleLine = true,
-                shape = MaterialTheme.shapes.small
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp)
             )
 
             Button(
@@ -188,11 +188,11 @@ fun AppsScreen(
                 enabled = !state.isAutoCategorizing && state.allApps.isNotEmpty(),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(54.dp)
+                    .height(52.dp)
                     .testTag("auto_categorize_button"),
-                shape = MaterialTheme.shapes.small,
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = CyberElectricCyan,
+                    containerColor = CyberElectricBlue,
                     contentColor = CyberOnCyan
                 )
             ) {
@@ -213,9 +213,9 @@ fun AppsScreen(
 
             state.statusMessage?.let { msg ->
                 Surface(
-                    shape = MaterialTheme.shapes.small,
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
                     color = StatusCyanInfoContainer,
-                    border = BorderStroke(1.dp, CyberElectricCyan)
+                    border = BorderStroke(0.8.dp, CyberElectricCyan.copy(alpha = 0.65f))
                 ) {
                     Row(
                         modifier = Modifier
@@ -244,14 +244,14 @@ fun AppsScreen(
                     FilterChip(
                         selected = state.selectedFolder == null,
                         onClick = { viewModel.selectFolder(null) },
-                        shape = MaterialTheme.shapes.small,
+                        shape = androidx.compose.foundation.shape.CircleShape,
                         colors = FilterChipDefaults.filterChipColors(
                             containerColor = CyberSurfaceNavy,
                             labelColor = CyberTextPrimary,
                             selectedContainerColor = CyberElectricBlue,
                             selectedLabelColor = Color.White
                         ),
-                        border = BorderStroke(1.dp, if (state.selectedFolder == null) CyberElectricCyan else CyberBorderGlow),
+                        border = BorderStroke(0.8.dp, if (state.selectedFolder == null) CyberElectricCyan else CyberBorderGlow),
                         leadingIcon = {
                             Icon(Icons.Rounded.Apps, contentDescription = null, modifier = Modifier.size(18.dp))
                         },
@@ -264,14 +264,14 @@ fun AppsScreen(
                     FilterChip(
                         selected = selected,
                         onClick = { viewModel.selectFolder(folder) },
-                        shape = MaterialTheme.shapes.small,
+                        shape = androidx.compose.foundation.shape.CircleShape,
                         colors = FilterChipDefaults.filterChipColors(
                             containerColor = CyberSurfaceNavy,
                             labelColor = CyberTextPrimary,
                             selectedContainerColor = CyberElectricBlue,
                             selectedLabelColor = Color.White
                         ),
-                        border = BorderStroke(1.dp, if (selected) CyberElectricCyan else CyberBorderGlow),
+                        border = BorderStroke(0.8.dp, if (selected) CyberElectricCyan else CyberBorderGlow),
                         leadingIcon = {
                             Icon(folder.icon, contentDescription = null, modifier = Modifier.size(18.dp))
                         },
@@ -701,22 +701,23 @@ private fun AppDrawableIcon(icon: Drawable?, label: String) {
     val bitmap = remember(icon) {
         runCatching { icon?.toBitmap(96, 96)?.asImageBitmap() }.getOrNull()
     }
+    val squircle = androidx.compose.foundation.shape.RoundedCornerShape(14.dp)
     if (bitmap != null) {
         Image(
             bitmap = bitmap,
             contentDescription = "أيقونة $label",
             modifier = Modifier
                 .size(50.dp)
-                .clip(MaterialTheme.shapes.small)
-                .border(1.dp, CyberBorderGlow, MaterialTheme.shapes.small)
+                .clip(squircle)
+                .border(0.75.dp, CyberBorderGlow, squircle)
         )
     } else {
         Box(
             modifier = Modifier
                 .size(50.dp)
-                .clip(MaterialTheme.shapes.small)
+                .clip(squircle)
                 .background(CyberSurfaceElevated)
-                .border(1.dp, CyberBorderGlow, MaterialTheme.shapes.small),
+                .border(0.75.dp, CyberBorderGlow, squircle),
             contentAlignment = Alignment.Center
         ) {
             Icon(
