@@ -152,7 +152,8 @@ fun PhoneAgentApp(
             executionController = executionController,
             floatingControlManager = floatingControlManager,
             appContext = applicationContext,
-            agentPolicy = appContainer.agentPolicy
+            agentPolicy = appContainer.agentPolicy,
+            phoneFileManager = appContainer.phoneFileManager
         )
     )
     val appsViewModel: AppsViewModel = viewModel(
@@ -280,7 +281,7 @@ fun PhoneAgentApp(
                                     viewModel = appsViewModel,
                                     onStartGameplayFromApps = {
                                         navigateTo(AgentDestination.Commands.route)
-                                        commandsViewModel.startGameplayGoal()
+                                        commandsViewModel.analyzeAndPlanCommand("العب لعبة")
                                     },
                                     onOpenPermissionsTab = { navigateTo(AgentDestination.Permissions.route) }
                                 )

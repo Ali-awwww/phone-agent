@@ -169,4 +169,13 @@ class ChatIntentRouterTest {
 
         assertNotNull(policy.findForbiddenCategory("تجاوز قفل الشاشة بدون بصمة"))
     }
+
+    @Test
+    fun `file management requests route to FileManagement and play game phrase routes to StartGameplay`() {
+        assertTrue(ChatIntentRouter.classifyIntent("افحص الملفات والمجلدات الفارغة") is ChatRouteIntent.FileManagement)
+        assertTrue(ChatIntentRouter.classifyIntent("تنظيف الملفات المؤقتة") is ChatRouteIntent.FileManagement)
+        assertTrue(ChatIntentRouter.classifyIntent("افتح سلة المهملات") is ChatRouteIntent.FileManagement)
+        assertTrue(ChatIntentRouter.classifyIntent("العب لعبة") is ChatRouteIntent.StartGameplay)
+        assertTrue(ChatIntentRouter.classifyIntent("اعرض تطبيقاتي") is ChatRouteIntent.ShowApps)
+    }
 }

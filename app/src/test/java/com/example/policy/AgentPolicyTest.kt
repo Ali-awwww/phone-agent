@@ -134,4 +134,33 @@ class AgentPolicyTest {
         val decision = policy.validatePlan(safePlan)
         assertTrue("Safe plan should be allowed: ${decision.reasonAr}", decision.allowed)
     }
+
+    @Test
+    fun `allows narrow file cleanup requests while still blocking data and photo deletion`() {
+        assertTrue(policy.evaluateCommand("افحص الهاتف واحذف المجلدات الفارغة").allowed)
+        assertTrue(policy.evaluateCommand("تنظيف الملفات المؤقتة").allowed)
+        assertFalse(policy.evaluateCommand("قم بحذف البيانات والصور من التطبيق").allowed)
+        assertFalse(policy.evaluateCommand("حذف محادثات واتساب").allowed)
+    }
+
+    @Test
+    fun `validateFileCleanupBatch requires explicit approval and rejects excluded Android paths`() {
+        val unapproved = policy.validateFileCleanupBatch(
+            paths = listOf("/storage/emulated/0/Download/EmptyDir"),
+            approvedByUser = false
+        )
+        assertFalse(unapproved.allowed)
+
+        val protectedPath = policy.validateFileCleanupBatch(
+            paths = listOf("/storage/emulated/0/Android/data/com.foo"),
+            approvedByUser = true
+        )
+        assertFalse(protectedPath.allowed)
+
+        val valid = policy.validateFileCleanupBatch(
+            paths = listOf("/storage/emulated/0/Download/EmptyDir"),
+            approvedByUser = true
+        )
+        assertTrue(valid.allowed)
+    }
 }

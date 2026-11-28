@@ -86,6 +86,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.BuildConfig
 import com.example.data.local.ChatMessageEntity
 import com.example.data.local.ChatMessageType
+import com.example.permissions.PermissionHelper
 import com.example.policy.AgentPromptRules
 import com.example.ui.components.AppPickerForGameplayDialog
 import com.example.ui.components.ChatLiveExecutionActions
@@ -93,6 +94,9 @@ import com.example.ui.components.ChatLiveExecutionBubble
 import com.example.ui.components.ChatMessageBubble
 import com.example.ui.components.CyberPanelCard
 import com.example.ui.components.CyberPlanCard
+import com.example.ui.components.FileCleanupBatchApprovalDialog
+import com.example.ui.components.FilePermissionExplanationDialog
+import com.example.ui.components.FileTrashDialog
 import com.example.ui.components.PlayFeatureInfoDialog
 import com.example.ui.components.PlayWithAgentPromoCard
 import com.example.ui.components.SensitiveStepApprovalDialog
@@ -168,6 +172,12 @@ fun CommandsScreen(
         } else {
             viewModel.reportMicPermissionDenied()
         }
+    }
+
+    val allFilesPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        viewModel.onFilePermissionSettingsReturned()
     }
 
     val recordPermissionGranted = ContextCompat.checkSelfPermission(
@@ -286,7 +296,7 @@ fun CommandsScreen(
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             IconButton(
-                                onClick = { viewModel.startGameplayGoal() },
+                                onClick = { viewModel.analyzeAndPlanCommand("العب لعبة") },
                                 modifier = Modifier
                                     .size(48.dp)
                                     .testTag("header_take_over_play_button")
@@ -398,7 +408,7 @@ fun CommandsScreen(
 
                 item(key = "play_promo_card") {
                     PlayWithAgentPromoCard(
-                        onTakeOverPlayClick = { viewModel.startGameplayGoal() },
+                        onTakeOverPlayClick = { viewModel.analyzeAndPlanCommand("العب لعبة") },
                         onExplainFeatureClick = { viewModel.openPlayFeatureDialog() },
                         compact = displayMessages.isNotEmpty()
                     )
@@ -412,7 +422,7 @@ fun CommandsScreen(
                         onLaunchApp = { pkg, label -> viewModel.launchAppFromChat(pkg, label) },
                         onToggleTaskCompleted = { id, done -> viewModel.toggleTaskCompleted(id, done) },
                         onCancelTask = { id -> viewModel.cancelTaskById(id) },
-                        onTakeOverPlayClick = { viewModel.startGameplayGoal() },
+                        onTakeOverPlayClick = { viewModel.analyzeAndPlanCommand("العب لعبة") },
                         onExplainFeatureClick = { viewModel.openPlayFeatureDialog() }
                     )
                 }
@@ -635,7 +645,8 @@ fun CommandsScreen(
         PlayFeatureInfoDialog(
             onDismiss = { viewModel.dismissPlayFeatureDialog() },
             onStartGameplay = {
-                viewModel.startGameplayGoal()
+                viewModel.dismissPlayFeatureDialog()
+                viewModel.analyzeAndPlanCommand("العب لعبة")
             },
             onOpenPermissions = {
                 viewModel.dismissPlayFeatureDialog()
@@ -654,6 +665,37 @@ fun CommandsScreen(
             onAppSelected = { app ->
                 viewModel.selectAppForGameplay(app)
             }
+        )
+    }
+
+    if (state.showFilePermissionDialog) {
+        FilePermissionExplanationDialog(
+            onRequestAllFilesPermission = {
+                allFilesPermissionLauncher.launch(PermissionHelper.buildAllFilesAccessIntent(context))
+            },
+            onContinueScopedStorage = {
+                viewModel.continueFileScanWithScopedFallback()
+            },
+            onDismiss = {
+                viewModel.dismissFilePermissionDialog()
+            }
+        )
+    }
+
+    state.currentPendingFileBatch?.let { batch ->
+        FileCleanupBatchApprovalDialog(
+            batch = batch,
+            onConfirmBatch = { viewModel.approveCurrentFileBatch() },
+            onCancelBatch = { viewModel.skipOrCancelCurrentFileBatch() }
+        )
+    }
+
+    if (state.showTrashDialog) {
+        FileTrashDialog(
+            items = state.trashItems,
+            onRestoreItem = { id -> viewModel.restoreTrashItem(id) },
+            onPermanentDeleteItem = { id -> viewModel.permanentlyDeleteTrashItem(id) },
+            onDismiss = { viewModel.dismissTrashDialog() }
         )
     }
 }

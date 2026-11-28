@@ -34,6 +34,8 @@ sealed interface ChatRouteIntent {
     data class ConversationalChat(val message: String) : ChatRouteIntent
 
     data class ExecuteCommandPlan(val command: String) : ChatRouteIntent
+
+    data class FileManagement(val queryText: String) : ChatRouteIntent
 }
 
 enum class GameGestureAction {
@@ -100,6 +102,11 @@ object ChatIntentRouter {
             return ChatRouteIntent.ShowActionHistory
         }
 
+        // 1.8 إدارة الملفات ومسح المجلدات الفارغة
+        if (isFileManagementRequest(norm)) {
+            return ChatRouteIntent.FileManagement(raw)
+        }
+
         // 2. وضع اللعب العام المجاني
         if (isGameplayRequest(norm)) {
             return ChatRouteIntent.StartGameplay(raw)
@@ -143,8 +150,53 @@ object ChatIntentRouter {
             is ChatRouteIntent.CancelTaskOrReminder,
             is ChatRouteIntent.ShowApps,
             is ChatRouteIntent.ShowActionHistory,
-            is ChatRouteIntent.PromptReminderDetails -> ModelRouteTier.FLASH
+            is ChatRouteIntent.PromptReminderDetails,
+            is ChatRouteIntent.FileManagement -> ModelRouteTier.FLASH
         }
+    }
+
+    private fun isFileManagementRequest(norm: String): Boolean {
+        val cleaned = norm.replace("؟", "").replace("?", "").trim()
+        val phrases = listOf(
+            "فحص الملفات",
+            "فحص الهاتف",
+            "فحص التخزين",
+            "فحص المجلدات",
+            "مسح الهاتف",
+            "مسح الملفات",
+            "ملفات الهاتف",
+            "ملفات الجهاز",
+            "مجلدات فارغة",
+            "مجلدات فارغه",
+            "المجلدات الفارغة",
+            "المجلدات الفارغه",
+            "حذف المجلدات",
+            "حذف الملفات",
+            "تنظيف الملفات",
+            "تنظيف المجلدات",
+            "تنظيف الهاتف",
+            "تنظيف التخزين",
+            "تنظيف الكاش",
+            "ملفات كبيرة",
+            "ملفات كبيره",
+            "ملفات مكررة",
+            "ملفات مكرره",
+            "ملفات مؤقتة",
+            "ملفات مؤقته",
+            "ذاكرة التخزين المؤقت",
+            "سلة المهملات",
+            "استعادة الملفات",
+            "استرجاع الملفات",
+            "التخزين",
+            "file management",
+            "clean empty folders",
+            "empty folders",
+            "scan files",
+            "scan storage"
+        )
+        return phrases.any { cleaned.contains(it) } ||
+            cleaned == "ملفات" ||
+            cleaned == "الملفات"
     }
 
     private fun isActionHistoryRequest(norm: String): Boolean {

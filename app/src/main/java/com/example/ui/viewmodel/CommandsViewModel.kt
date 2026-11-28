@@ -22,6 +22,11 @@ import com.example.executor.ChatIntentRouter
 import com.example.executor.ChatRouteIntent
 import com.example.executor.CommandExecutor
 import com.example.executor.ReminderReceiver
+import com.example.files.FileCleanupBatch
+import com.example.files.FileScanReport
+import com.example.files.PhoneFileManager
+import com.example.files.TrashItemRecord
+import com.example.files.formatFileSize
 import com.example.game.GeneralGameEngine
 import com.example.model.AgentPlan
 import com.example.model.AgentPlanStep
@@ -138,10 +143,20 @@ data class CommandsScreenState(
     val isModelStatusExpanded: Boolean = false,
     val activeError: CompactErrorState? = null,
     val isErrorDetailsExpanded: Boolean = false,
-    val lastModelTraceAr: String = ""
+    val lastModelTraceAr: String = "",
+    val showFilePermissionDialog: Boolean = false,
+    val pendingFileQuery: String? = null,
+    val latestFileReport: FileScanReport? = null,
+    val pendingFileBatches: List<FileCleanupBatch> = emptyList(),
+    val currentFileBatchIndex: Int = 0,
+    val showTrashDialog: Boolean = false,
+    val trashItems: List<TrashItemRecord> = emptyList()
 ) {
     val isAnyTaskRunning: Boolean
         get() = isBusyWorking || uiState is CommandsUiState.Planning || isExecuting || isGameplayRunning
+
+    val currentPendingFileBatch: FileCleanupBatch?
+        get() = pendingFileBatches.getOrNull(currentFileBatchIndex)
 }
 
 class CommandsViewModel(
@@ -156,7 +171,12 @@ class CommandsViewModel(
     private val executionController: AgentExecutionController,
     private val floatingControlManager: AgentFloatingControlManager,
     private val appContext: Context,
-    private val agentPolicy: AgentPolicy = AgentPolicy()
+    private val agentPolicy: AgentPolicy = AgentPolicy(),
+    private val phoneFileManager: PhoneFileManager = PhoneFileManager(
+        context = appContext,
+        actionLogRepository = actionLogRepository,
+        agentPolicy = agentPolicy
+    )
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(CommandsScreenState())
@@ -181,6 +201,9 @@ class CommandsViewModel(
     private var lastSubmittedCommand: String? = null
     private var lastRecordedAudio: Pair<ByteArray, String>? = null
     private var lastGameplayGoal: String? = null
+    private var fileBatchRunMovedCount: Int = 0
+    private var fileBatchRunSkippedCount: Int = 0
+    private var fileBatchRunFreedBytes: Long = 0L
     private val conversationTurns = mutableListOf<ChatTurn>()
 
     private fun recordConversationTurn(userMessage: String, agentReply: String) {
@@ -269,7 +292,7 @@ class CommandsViewModel(
                 }
             }
             ErrorRetryType.GAMEPLAY -> {
-                startGameplayGoal(lastGameplayGoal ?: "العب اللعبة أو التطبيق الظاهر على الشاشة كالإنسان خطوة بخطوة")
+                analyzeAndPlanCommand(lastGameplayGoal ?: "العب لعبة", addUserBubble = false)
             }
             ErrorRetryType.MINI_CHAT -> {
                 val cmd = error.retryCommand
@@ -698,10 +721,10 @@ class CommandsViewModel(
                 val installed = ensureInstalledAppsLoaded()
                 val appLabels = installed.map { it.label }
 
-                // 1. فحص الممنوعات الصارمة (كلمات مرور، بصمة، دفع، حذف بيانات، تحويل أموال...)
-                val forbiddenCategory = agentPolicy.findForbiddenCategory(command)
-                if (forbiddenCategory != null) {
-                    val reason = "عذراً، لا أستطيع تنفيذ أي طلب يتعلق بـ«${forbiddenCategory.titleAr}» حفاظاً على أمانك وخصوصيتك. ${AgentPolicy.SUGGESTION_AR}"
+                // 1. فحص الممنوعات الصارمة (كلمات مرور، بصمة، دفع، حذف بيانات، تحويل أموال...) مع استثناء تنظيف الملفات الآمن
+                val initialPolicy = agentPolicy.evaluateCommand(command, appLabels)
+                if (!initialPolicy.allowed) {
+                    val reason = initialPolicy.reasonAr
                     actionLogRepository.logAction(
                         title = "رفض أمر وفق سياسة الوكيل",
                         details = "$command | السبب: $reason",
@@ -856,9 +879,238 @@ class CommandsViewModel(
             ChatRouteIntent.ListTasksAndReminders -> handleListTasks(cmdText)
             is ChatRouteIntent.CancelTaskOrReminder -> handleCancelTaskByQuery(route.queryText, cmdText)
             is ChatRouteIntent.StartGameplay -> startGameplayGoal(route.goalText)
+            is ChatRouteIntent.FileManagement -> handleFileManagement(route.queryText, cmdText)
             is ChatRouteIntent.ConversationalChat -> handleConversationalChat(route.message, rawCommand ?: route.message)
             is ChatRouteIntent.ExecuteCommandPlan -> Unit
         }
+    }
+
+    private suspend fun handleFileManagement(queryText: String, userCommand: String) {
+        if (phoneFileManager.isTrashQuery(queryText)) {
+            val activeTrash = phoneFileManager.listTrashItems()
+            val reply = if (activeTrash.isEmpty()) {
+                "سلة المهملات فارغة حالياً. تُحفظ العناصر المنقولة إليها لمدة 7 أيام قبل الحذف النهائي التلقائي."
+            } else {
+                "يوجد ${activeTrash.size} عنصر في سلة المهملات (تُحفظ 7 أيام). يمكنك استعادتها أو حذفها نهائياً الآن."
+            }
+            recordConversationTurn(userCommand, reply)
+            chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
+            _state.update {
+                it.copy(
+                    uiState = CommandsUiState.Idle,
+                    lastSpokenReply = reply,
+                    trashItems = activeTrash,
+                    showTrashDialog = true
+                )
+            }
+            speakIfEnabled(reply)
+            return
+        }
+
+        if (!phoneFileManager.hasAllFilesPermission()) {
+            val explainMsg = "لفحص تخزين الهاتف بالكامل واكتشاف المجلدات الفارغة والملفات الزائدة، أحتاج أولاً إذن «الوصول إلى كل الملفات». وإذا فضّلت عدم منحه، سأتابع الفحص داخل المجلدات المتاحة بالتخزين المحدود."
+            recordConversationTurn(userCommand, explainMsg)
+            chatHistoryRepository.addAgentMessage(explainMsg, ChatMessageType.TEXT)
+            _state.update {
+                it.copy(
+                    uiState = CommandsUiState.Idle,
+                    lastSpokenReply = explainMsg,
+                    pendingFileQuery = queryText,
+                    showFilePermissionDialog = true
+                )
+            }
+            speakIfEnabled(explainMsg)
+            return
+        }
+
+        runFileScanAndPromptBatches(queryText = queryText, useScopedFallback = false)
+    }
+
+    fun onFilePermissionSettingsReturned() {
+        val pendingQuery = _state.value.pendingFileQuery ?: return
+        val hasAllFiles = phoneFileManager.hasAllFilesPermission()
+        _state.update { it.copy(showFilePermissionDialog = false, pendingFileQuery = null) }
+        viewModelScope.launch {
+            _state.update {
+                it.copy(
+                    isBusyWorking = true,
+                    statusNoticeAr = if (hasAllFiles) {
+                        "تم تفعيل صلاحية كل الملفات — جارٍ فحص التخزين..."
+                    } else {
+                        "لم تُمنح صلاحية كل الملفات — جارٍ الفحص بالتخزين المحدود..."
+                    }
+                )
+            }
+            try {
+                runFileScanAndPromptBatches(
+                    queryText = pendingQuery,
+                    useScopedFallback = !hasAllFiles
+                )
+            } finally {
+                _state.update { it.copy(isBusyWorking = false, statusNoticeAr = "") }
+            }
+        }
+    }
+
+    fun continueFileScanWithScopedFallback() {
+        val pendingQuery = _state.value.pendingFileQuery ?: "فحص الملفات"
+        _state.update { it.copy(showFilePermissionDialog = false, pendingFileQuery = null) }
+        viewModelScope.launch {
+            _state.update {
+                it.copy(
+                    isBusyWorking = true,
+                    statusNoticeAr = "جارٍ الفحص بالتخزين المحدود (مع استبعاد نظام Android)..."
+                )
+            }
+            try {
+                runFileScanAndPromptBatches(queryText = pendingQuery, useScopedFallback = true)
+            } finally {
+                _state.update { it.copy(isBusyWorking = false, statusNoticeAr = "") }
+            }
+        }
+    }
+
+    fun dismissFilePermissionDialog() {
+        _state.update { it.copy(showFilePermissionDialog = false, pendingFileQuery = null) }
+    }
+
+    private suspend fun runFileScanAndPromptBatches(
+        queryText: String,
+        useScopedFallback: Boolean
+    ) {
+        _state.update {
+            it.copy(statusNoticeAr = "جارٍ فحص ملفات الهاتف واستبعاد Android/ ومجلدات النظام...")
+        }
+        val report = phoneFileManager.scanDeviceFiles(useScopedFallback = useScopedFallback)
+        val (focusCategory, focusOnly) = phoneFileManager.detectRequestedFocus(queryText)
+        val batches = phoneFileManager.buildApprovalBatches(
+            report = report,
+            focusCategory = focusCategory,
+            focusOnly = focusOnly
+        )
+        val summaryText = report.toArabicSummaryText()
+
+        fileBatchRunMovedCount = 0
+        fileBatchRunSkippedCount = 0
+        fileBatchRunFreedBytes = 0L
+
+        recordConversationTurn(queryText, summaryText)
+        chatHistoryRepository.addAgentMessage(summaryText, ChatMessageType.TEXT)
+
+        val spokenSummary = if (batches.isEmpty()) {
+            "انتهى فحص الهاتف. لم يُعثر على عناصر مطابقة للحذف في النطاق المفحوص."
+        } else {
+            "انتهى الفحص؛ عثرت على ${report.emptyFoldersCount} مجلد فارغ و${report.items.size} عنصر إجمالاً. راجع الدفعة الأولى للموافقة قبل نقل أي عنصر للسلة."
+        }
+        _state.update {
+            it.copy(
+                uiState = CommandsUiState.Idle,
+                latestFileReport = report,
+                pendingFileBatches = batches,
+                currentFileBatchIndex = 0,
+                lastSpokenReply = spokenSummary
+            )
+        }
+        speakIfEnabled(spokenSummary)
+    }
+
+    fun approveCurrentFileBatch() {
+        val currentState = _state.value
+        val batch = currentState.currentPendingFileBatch ?: return
+        viewModelScope.launch {
+            _state.update {
+                it.copy(
+                    isBusyWorking = true,
+                    statusNoticeAr = "جارٍ نقل ${batch.titleAr} إلى سلة المهملات (7 أيام)..."
+                )
+            }
+            try {
+                val outcome = phoneFileManager.executeApprovedBatch(batch, approvedByUser = true)
+                fileBatchRunMovedCount += outcome.movedToTrashCount
+                fileBatchRunSkippedCount += outcome.skippedNonEmptyCount + outcome.skippedExcludedOrMissingCount
+                fileBatchRunFreedBytes += outcome.freedBytes
+
+                val batchMsg = buildString {
+                    append("تم تنفيذ ${batch.titleAr}: نُقل ${outcome.movedToTrashCount} عنصر إلى سلة المهملات (تُحفظ 7 أيام)")
+                    if (outcome.freedBytes > 0L) {
+                        append("، بمساحة ${formatFileSize(outcome.freedBytes)}")
+                    }
+                    if (outcome.skippedNonEmptyCount > 0) {
+                        append("، وتُخطّي ${outcome.skippedNonEmptyCount} مجلد لأنها لم تعد فارغة لحظة الحذف")
+                    }
+                    append(".")
+                }
+                chatHistoryRepository.addAgentMessage(batchMsg, ChatMessageType.TEXT)
+                advanceOrFinishFileBatches(currentState.pendingFileBatches, currentState.currentFileBatchIndex)
+            } finally {
+                _state.update { it.copy(isBusyWorking = false, statusNoticeAr = "") }
+            }
+        }
+    }
+
+    fun skipOrCancelCurrentFileBatch() {
+        val currentState = _state.value
+        val batch = currentState.currentPendingFileBatch ?: return
+        viewModelScope.launch {
+            actionLogRepository.logAction(
+                title = "إلغاء دفعة تنظيف ملفات",
+                details = "${batch.titleAr} (${batch.items.size} عناصر)",
+                status = ActionStatus.CANCELLED,
+                actionType = "FILE_BATCH_CANCELLED"
+            )
+            chatHistoryRepository.addAgentMessage(
+                "أُلغيت ${batch.titleAr} بناءً على طلبك ولم يُحذف أي عنصر منها.",
+                ChatMessageType.TEXT
+            )
+            advanceOrFinishFileBatches(currentState.pendingFileBatches, currentState.currentFileBatchIndex)
+        }
+    }
+
+    private suspend fun advanceOrFinishFileBatches(
+        batches: List<FileCleanupBatch>,
+        completedIndex: Int
+    ) {
+        val nextIndex = completedIndex + 1
+        if (nextIndex < batches.size) {
+            _state.update { it.copy(currentFileBatchIndex = nextIndex) }
+        } else {
+            val activeTrash = phoneFileManager.listTrashItems()
+            val finalMsg = "اكتملت مراجعة الدفعات: نُقل $fileBatchRunMovedCount عنصر إلى سلة المهملات (المساحة المحررة المؤقتة: ${formatFileSize(fileBatchRunFreedBytes)}، المتخطى: $fileBatchRunSkippedCount). يمكنك قول «سلة المهملات» في أي وقت للاستعادة خلال 7 أيام."
+            chatHistoryRepository.addAgentMessage(finalMsg, ChatMessageType.TEXT)
+            _state.update {
+                it.copy(
+                    pendingFileBatches = emptyList(),
+                    currentFileBatchIndex = 0,
+                    trashItems = activeTrash,
+                    lastSpokenReply = finalMsg
+                )
+            }
+            speakIfEnabled(finalMsg)
+        }
+    }
+
+    fun restoreTrashItem(id: String) {
+        viewModelScope.launch {
+            val outcome = phoneFileManager.restoreTrashItem(id)
+            val updated = phoneFileManager.listTrashItems()
+            chatHistoryRepository.addAgentMessage(outcome.messageAr, ChatMessageType.TEXT)
+            _state.update { it.copy(trashItems = updated, lastSpokenReply = outcome.messageAr) }
+        }
+    }
+
+    fun permanentlyDeleteTrashItem(id: String) {
+        viewModelScope.launch {
+            val deleted = phoneFileManager.permanentlyDeleteTrashItem(id)
+            val updated = phoneFileManager.listTrashItems()
+            if (deleted) {
+                chatHistoryRepository.addAgentMessage("تم الحذف النهائي للعنصر من سلة المهملات.", ChatMessageType.TEXT)
+            }
+            _state.update { it.copy(trashItems = updated) }
+        }
+    }
+
+    fun dismissTrashDialog() {
+        _state.update { it.copy(showTrashDialog = false) }
     }
 
     private suspend fun handleShowActionHistory(userCommand: String) {
@@ -1266,8 +1518,9 @@ class CommandsViewModel(
         _state.update { it.copy(showPlayFeatureDialog = false) }
     }
 
-    fun startGameplayGoal(goal: String = "العب اللعبة أو التطبيق الظاهر على الشاشة كالإنسان خطوة بخطوة") {
-        lastGameplayGoal = goal
+    fun startGameplayGoal(goal: String) {
+        val resolvedGoal = goal.trim().ifBlank { return }
+        lastGameplayGoal = resolvedGoal
         _state.update { it.copy(showPlayFeatureDialog = false, activeError = null, showAppPickerForGameplay = true) }
     }
 
@@ -1276,11 +1529,13 @@ class CommandsViewModel(
     }
 
     fun selectAppForGameplay(app: InstalledAppInfo) {
+        val chatGoal = lastGameplayGoal?.takeIf { it.isNotBlank() } ?: "العب لعبة"
+        val effectiveGoal = "$chatGoal — التطبيق المختار: ${app.label}"
         _state.update { it.copy(showAppPickerForGameplay = false) }
         launchAppFromChat(app.packageName, app.label)
         viewModelScope.launch {
             kotlinx.coroutines.delay(1200L)
-            startGameplayLoop("العب في تطبيق ${app.label}")
+            startGameplayLoop(effectiveGoal)
         }
     }
 
@@ -1748,9 +2003,9 @@ class CommandsViewModel(
             floatingControlManager.updateStatus("يفكر في توجيهك", isPaused = false)
 
             try {
-                val forbidden = agentPolicy.findForbiddenCategory(command)
-                if (forbidden != null) {
-                    val reply = "ممنوع وفق السياسة: ${forbidden.titleAr}"
+                val miniPolicy = agentPolicy.evaluateCommand(command)
+                if (!miniPolicy.allowed) {
+                    val reply = "ممنوع وفق السياسة: ${miniPolicy.violationCategory?.titleAr ?: miniPolicy.reasonAr}"
                     recordConversationTurn(command, reply)
                     chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
                     _state.update {
@@ -2210,7 +2465,12 @@ class CommandsViewModel(
         private val executionController: AgentExecutionController,
         private val floatingControlManager: AgentFloatingControlManager,
         private val appContext: Context,
-        private val agentPolicy: AgentPolicy = AgentPolicy()
+        private val agentPolicy: AgentPolicy = AgentPolicy(),
+        private val phoneFileManager: PhoneFileManager = PhoneFileManager(
+            context = appContext,
+            actionLogRepository = actionLogRepository,
+            agentPolicy = agentPolicy
+        )
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -2226,7 +2486,8 @@ class CommandsViewModel(
                 executionController = executionController,
                 floatingControlManager = floatingControlManager,
                 appContext = appContext,
-                agentPolicy = agentPolicy
+                agentPolicy = agentPolicy,
+                phoneFileManager = phoneFileManager
             ) as T
         }
     }

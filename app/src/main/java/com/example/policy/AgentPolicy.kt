@@ -189,11 +189,13 @@ class AgentPolicy {
         // 1. فحص القائمة الممنوعة الثمانية للأفعال الحساسة/الممنوعة قبل أي اتصال بـ Gemini
         val forbidden = findForbiddenCategory(trimmed)
         if (forbidden != null) {
-            return PolicyDecision(
-                allowed = false,
-                reasonAr = "عذراً، لا أستطيع تنفيذ أي إجراء يتعلق بـ«${forbidden.titleAr}» حفاظاً على أمانك وخصوصيتك. $SUGGESTION_AR",
-                violationCategory = forbidden
-            )
+            if (!(forbidden == ForbiddenCategory.DATA_DELETION && isAllowedFileManagementCleanup(trimmed))) {
+                return PolicyDecision(
+                    allowed = false,
+                    reasonAr = "عذراً، لا أستطيع تنفيذ أي إجراء يتعلق بـ«${forbidden.titleAr}» حفاظاً على أمانك وخصوصيتك. $SUGGESTION_AR",
+                    violationCategory = forbidden
+                )
+            }
         }
 
         // 2. إزالة القيد عن الأسئلة العامة والنقاش والاستشارات:
@@ -206,6 +208,85 @@ class AgentPolicy {
         return PolicyDecision(
             allowed = true,
             reasonAr = reason
+        )
+    }
+
+    fun isAllowedFileManagementCleanup(text: String): Boolean {
+        val normalized = normalizeArabic(text).lowercase()
+        if (normalized.isBlank()) return false
+
+        // حظر صريح لأي محاولة تمس بيانات التطبيقات أو الصور أو الرسائل أو جهات الاتصال أو الفورمات
+        val blockedTargets = listOf(
+            "بيانات",
+            "صور",
+            "الصور",
+            "رسائل",
+            "محادثات",
+            "جهات",
+            "واتساب",
+            "حساب",
+            "مصنع",
+            "فورمات",
+            "فرمتة",
+            "فرمته",
+            "تصفير",
+            "android/data",
+            "android/obb",
+            "android/media",
+            "factory reset",
+            "wipe",
+            "clear data",
+            "photos",
+            "messages",
+            "contacts"
+        )
+        if (blockedTargets.any { normalized.contains(it) }) {
+            return false
+        }
+
+        val allowedPatterns = listOf(
+            Regex("(?:مجلد|مجلدات)\\s*(?:ال)?فارغ[ةه]?"),
+            Regex("(?:فحص|تنظيف|مسح|حذف)\\s*(?:ال)?مجلدات"),
+            Regex("(?:فحص|تنظيف)\\s*(?:ال)?(?:ملفات|تخزين|هاتف)"),
+            Regex("(?:حذف|تنظيف)\\s*(?:ال)?ملفات\\s*(?:ال)?(?:مؤقت[ةه]?|مكرر[ةه]?|كبير[ةه]?|زائد[ةه]?)"),
+            Regex("ذاكر[ةه]\\s*(?:ال)?تخزين\\s*(?:ال)?مؤقت"),
+            Regex("سل[ةه]\\s*(?:ال)?مهملات"),
+            Regex("\\b(?:empty\\s+folders?|clean\\s+empty\\s+folders?|file\\s+management|scan\\s+files|temp(?:orary)?\\s+files|duplicate\\s+files|cache\\s+files)\\b", RegexOption.IGNORE_CASE)
+        )
+        return allowedPatterns.any { it.containsMatchIn(normalized) }
+    }
+
+    fun validateFileCleanupBatch(
+        paths: List<String>,
+        approvedByUser: Boolean,
+        appPackageName: String = "",
+        trashRootPath: String? = null
+    ): PolicyDecision {
+        if (!approvedByUser) {
+            return PolicyDecision(
+                allowed = false,
+                reasonAr = "لا يمكن حذف أو نقل أي ملفات قبل موافقة المستخدم الصريحة على هذه الدفعة تحديداً.",
+                violationCategory = ForbiddenCategory.DATA_DELETION
+            )
+        }
+        if (paths.isEmpty()) {
+            return PolicyDecision(
+                allowed = false,
+                reasonAr = "الدفعة المحددة فارغة ولا تحتوي على عناصر."
+            )
+        }
+        for (path in paths) {
+            if (com.example.files.PhoneFileScanner.isExcludedPath(path, appPackageName, trashRootPath)) {
+                return PolicyDecision(
+                    allowed = false,
+                    reasonAr = "تم إيقاف الدفعة لأنها تتضمن مساراً محمياً من النظام أو مجلدات Android: $path",
+                    violationCategory = ForbiddenCategory.DATA_DELETION
+                )
+            }
+        }
+        return PolicyDecision(
+            allowed = true,
+            reasonAr = "دفعة تنظيف الملفات معتمدة من المستخدم وآمنة للتنفيذ."
         )
     }
 

@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.os.Process
 import android.provider.Settings
 import android.widget.Toast
@@ -24,7 +25,8 @@ enum class AgentPermissionType {
     USAGE_ACCESS,
     MICROPHONE,
     NOTIFICATIONS,
-    EXACT_ALARMS
+    EXACT_ALARMS,
+    STORAGE_ALL_FILES
 }
 
 data class AgentPermissionItem(
@@ -90,6 +92,13 @@ object PermissionHelper {
                 isRuntimePermission = false
             ),
             AgentPermissionItem(
+                type = AgentPermissionType.STORAGE_ALL_FILES,
+                titleAr = "إدارة وفحص ملفات الهاتف (MANAGE_EXTERNAL_STORAGE)",
+                explanationAr = "يتيح لأداة الملفات عند طلبها من المحادثة فحص المجلدات الفارغة والملفات المؤقتة والمكررة والكبيرة (باستثناء نظام Android)، مع طلب الموافقة قبل كل دفعة ونقل المحذوفات إلى سلة 7 أيام.",
+                isGranted = isAllFilesAccessGranted(context),
+                isRuntimePermission = false
+            ),
+            AgentPermissionItem(
                 type = AgentPermissionType.MICROPHONE,
                 titleAr = "الميكروفون (RECORD_AUDIO)",
                 explanationAr = "يسمح لك بالتحدث إلى «وكيل الهاتف» بالعربية وإجراء محادثات صوتية مباشرة دون الحاجة للكتابة.",
@@ -118,6 +127,33 @@ object PermissionHelper {
                 isRuntimePermission = false
             )
         )
+    }
+
+    fun isAllFilesAccessGranted(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.READ_EXTERNAL_STORAGE
+            ) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    fun buildAllFilesAccessIntent(context: Context): Intent {
+        val pkgUri = Uri.parse("package:${context.packageName}")
+        val candidates = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            listOf(
+                Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, pkgUri),
+                Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkgUri)
+            )
+        } else {
+            listOf(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkgUri))
+        }
+        return candidates.firstOrNull { intent ->
+            intent.resolveActivity(context.packageManager) != null
+        } ?: Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkgUri)
     }
 
     fun isAccessibilityEnabled(context: Context): Boolean {
@@ -229,6 +265,15 @@ object PermissionHelper {
                 Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS),
                 buildAppDetailsIntent(context)
             )
+            AgentPermissionType.STORAGE_ALL_FILES -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                listOf(
+                    Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, pkgUri),
+                    Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
+                    buildAppDetailsIntent(context)
+                )
+            } else {
+                listOf(buildAppDetailsIntent(context))
+            }
             AgentPermissionType.EXACT_ALARMS -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 listOf(
                     Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, pkgUri),

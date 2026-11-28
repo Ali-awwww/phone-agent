@@ -30,6 +30,11 @@
     <!-- نافذة عائمة لعرض زر إيقاف فوري فوق الألعاب والتطبيقات أثناء وضع اللعب -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
+    <!-- صلاحية إدارة وتخزين الملفات لفحص وحذف المجلدات الفارغة -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />

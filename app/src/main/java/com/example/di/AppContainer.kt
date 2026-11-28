@@ -5,6 +5,7 @@ import com.example.data.ai.GeminiRepository
 import com.example.data.local.ActionLogRepository
 import com.example.data.local.PhoneAgentDatabase
 import com.example.executor.CommandExecutor
+import com.example.files.PhoneFileManager
 import com.example.organizer.AppOrganizer
 import com.example.policy.AgentPolicy
 import com.example.security.FirebaseAppCheckClient
@@ -57,6 +58,14 @@ class AppContainer(context: Context) {
             appOrganizationDao = database.appOrganizationDao(),
             actionLogRepository = actionLogRepository,
             geminiRepository = geminiRepository
+        )
+    }
+
+    val phoneFileManager by lazy {
+        PhoneFileManager(
+            context = appContext,
+            actionLogRepository = actionLogRepository,
+            agentPolicy = agentPolicy
         )
     }
 

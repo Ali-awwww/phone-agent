@@ -27,6 +27,7 @@ import androidx.compose.material.icons.rounded.Alarm
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.NotificationsActive
@@ -308,6 +309,7 @@ private fun PermissionItemCard(
         AgentPermissionType.MICROPHONE -> Icons.Rounded.Mic
         AgentPermissionType.NOTIFICATIONS -> Icons.Rounded.NotificationsActive
         AgentPermissionType.EXACT_ALARMS -> Icons.Rounded.Alarm
+        AgentPermissionType.STORAGE_ALL_FILES -> Icons.Rounded.FolderOpen
     }
 
     CyberPanelCard(
