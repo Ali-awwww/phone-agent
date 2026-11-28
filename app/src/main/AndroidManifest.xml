@@ -35,6 +35,9 @@
         android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
 
+    <!-- إعادة جدولة التذكيرات عند إقلاع الجهاز (F10) -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -83,6 +86,15 @@
                 <data android:scheme="phoneagent" />
             </intent-filter>
         </activity>
+
+        <receiver
+            android:name=".executor.BootCompletedReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
 
         <!-- خدمة إمكانية الوصول لوكيل الهاتف -->
         <service

@@ -75,6 +75,9 @@ data class AgentTaskEntity(
     val alarmRequestCode: Int? = null,
     val isCompleted: Boolean = false,
     val isCancelled: Boolean = false,
+    val isMissed: Boolean = false,
+    val recurrencePattern: String? = null, // e.g. "DAILY"
+    val conditionalPackage: String? = null, // e.g. "com.whatsapp"
     val createdAt: Long = System.currentTimeMillis()
 )
 
@@ -162,4 +165,52 @@ class ChatHistoryRepository(
     suspend fun cancelTask(id: Long) {
         agentTaskDao.markCancelled(id)
     }
+}
+
+@Entity(tableName = "user_memory")
+data class UserMemoryEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+    val fact: String,
+    val source: String = "CONVERSATION",
+    val confidence: Float = 1.0f,
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+@Dao
+interface UserMemoryDao {
+    @Query("SELECT * FROM user_memory ORDER BY createdAt DESC")
+    fun observeAllMemories(): Flow<List<UserMemoryEntity>>
+
+    @Query("SELECT * FROM user_memory ORDER BY createdAt DESC")
+    suspend fun getAllMemories(): List<UserMemoryEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertMemory(memory: UserMemoryEntity): Long
+
+    @Query("DELETE FROM user_memory WHERE id = :id")
+    suspend fun deleteMemory(id: Long)
+
+    @Query("DELETE FROM user_memory")
+    suspend fun clearAllMemories()
+}
+
+@Entity(tableName = "habit_logs")
+data class HabitLogEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+    val actionName: String,
+    val hourOfDay: Int,
+    val dayOfWeek: Int,
+    val frequencyCount: Int = 1,
+    val lastTimestamp: Long = System.currentTimeMillis()
+)
+
+@Dao
+interface HabitLogDao {
+    @Query("SELECT * FROM habit_logs ORDER BY frequencyCount DESC")
+    suspend fun getAllHabits(): List<HabitLogEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertHabit(habit: HabitLogEntity): Long
 }

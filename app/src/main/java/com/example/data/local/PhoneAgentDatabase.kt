@@ -12,9 +12,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ActionLogEntity::class,
         AppOrganizationEntity::class,
         ChatMessageEntity::class,
-        AgentTaskEntity::class
+        AgentTaskEntity::class,
+        UserMemoryEntity::class,
+        HabitLogEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class PhoneAgentDatabase : RoomDatabase() {
@@ -22,6 +24,8 @@ abstract class PhoneAgentDatabase : RoomDatabase() {
     abstract fun appOrganizationDao(): AppOrganizationDao
     abstract fun chatMessageDao(): ChatMessageDao
     abstract fun agentTaskDao(): AgentTaskDao
+    abstract fun userMemoryDao(): UserMemoryDao
+    abstract fun habitLogDao(): HabitLogDao
 
     companion object {
         @Volatile
@@ -60,6 +64,34 @@ abstract class PhoneAgentDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `user_memory` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `fact` TEXT NOT NULL,
+                        `source` TEXT NOT NULL,
+                        `confidence` REAL NOT NULL,
+                        `createdAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `habit_logs` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `actionName` TEXT NOT NULL,
+                        `hourOfDay` INTEGER NOT NULL,
+                        `dayOfWeek` INTEGER NOT NULL,
+                        `frequencyCount` INTEGER NOT NULL,
+                        `lastTimestamp` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): PhoneAgentDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -67,7 +99,7 @@ abstract class PhoneAgentDatabase : RoomDatabase() {
                     PhoneAgentDatabase::class.java,
                     "phone_agent.db"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
                     .also { INSTANCE = it }
             }
