@@ -51,6 +51,7 @@ import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.SportsEsports
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -68,7 +69,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -132,9 +135,11 @@ fun CommandsScreen(
     val context = LocalContext.current
     val state by viewModel.state.collectAsStateWithLifecycle()
     val messages by viewModel.messages.collectAsStateWithLifecycle()
+    val hasOlderMessages by viewModel.hasOlderMessages.collectAsStateWithLifecycle()
     val activeTasks by viewModel.activeTasks.collectAsStateWithLifecycle()
     val installedAppsByPackage by viewModel.installedAppsByPackage.collectAsStateWithLifecycle()
     val isAccessibilityConnected by viewModel.isAccessibilityConnected.collectAsStateWithLifecycle()
+    var showClearChatConfirmDialog by remember { mutableStateOf(false) }
 
     // منع تكدّس فقاعات الأخطاء المتكررة المتطابقة من السجلات القديمة
     val displayMessages = remember(messages) {
@@ -329,7 +334,7 @@ fun CommandsScreen(
                             }
                             if (messages.isNotEmpty()) {
                                 IconButton(
-                                    onClick = { viewModel.clearChatHistory() },
+                                    onClick = { showClearChatConfirmDialog = true },
                                     modifier = Modifier
                                         .size(48.dp)
                                         .testTag("clear_chat_button")
@@ -414,6 +419,27 @@ fun CommandsScreen(
                     )
                 }
 
+                if (hasOlderMessages) {
+                    item(key = "load_older_messages_button") {
+                        OutlinedButton(
+                            onClick = { viewModel.loadOlderMessages() },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("load_older_messages_button"),
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, CyberBorderGlow)
+                        ) {
+                            Text(
+                                text = "تحميل رسائل أقدم",
+                                color = CyberElectricCyan,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+
                 items(displayMessages, key = { it.id }) { msg ->
                     ChatMessageBubble(
                         message = msg,
@@ -435,7 +461,8 @@ fun CommandsScreen(
                             isPlanComplete = plan.isComplete,
                             executionMessage = state.executionTruthReportAr.orEmpty(),
                             onNewPlan = { viewModel.resetToIdle() },
-                            onExecutePlan = { viewModel.executePlanStepByStep() },
+                            onExecutePlan = { viewModel.executePlanStepByStep(singleStepOnly = false) },
+                            onExecuteNextStep = { viewModel.executePlanStepByStep(singleStepOnly = true) },
                             onCancelExecution = { viewModel.cancelCurrentTask() }
                         )
                     }
@@ -461,6 +488,11 @@ fun CommandsScreen(
                             isPaused = isPaused,
                             isHandedOver = isHandedOver,
                             canPauseOrTakeOver = canPauseOrTakeOver,
+                            doingNowAr = state.liveDoingNowAr.ifBlank { state.statusNoticeAr },
+                            nextStepAr = state.liveNextStepAr,
+                            waitingForUserAr = state.liveWaitingForUserAr,
+                            elapsedSeconds = state.geminiElapsedSeconds,
+                            timeoutSeconds = state.geminiTimeoutSeconds,
                             actions = liveActions
                         )
                     }
@@ -636,8 +668,106 @@ fun CommandsScreen(
         SensitiveStepApprovalDialog(
             step = step,
             fullPlan = state.pendingApprovalPlan,
+            nextStep = state.pendingApprovalNextStep,
             onApprove = { viewModel.resolveApproval(true) },
             onReject = { viewModel.resolveApproval(false) }
+        )
+    }
+
+    if (showClearChatConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearChatConfirmDialog = false },
+            containerColor = CyberSurfaceNavy,
+            titleContentColor = StatusCancelled,
+            textContentColor = CyberTextPrimary,
+            title = {
+                Text(
+                    text = "تأكيد مسح سجل الدردشة",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    text = "سيتم حذف جميع رسائل المحادثة الحالية نهائياً ولا يمكن استعادتها. هل تريد المتابعة؟",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showClearChatConfirmDialog = false
+                        viewModel.clearChatHistory()
+                    },
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("confirm_clear_chat_button"),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = StatusCancelled,
+                        contentColor = Color.White
+                    )
+                ) {
+                    Text("نعم، امسح الدردشة", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { showClearChatConfirmDialog = false },
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("cancel_clear_chat_button"),
+                    border = BorderStroke(1.dp, CyberBorderGlow)
+                ) {
+                    Text("إلغاء", color = CyberTextPrimary)
+                }
+            }
+        )
+    }
+
+    state.pendingTaskCancelConfirmation?.let { taskToCancel ->
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissTaskCancellationConfirmation() },
+            containerColor = CyberSurfaceNavy,
+            titleContentColor = StatusPending,
+            textContentColor = CyberTextPrimary,
+            title = {
+                Text(
+                    text = "تأكيد إلغاء التذكير أو المهمة",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    text = "هل تريد بالتأكيد إلغاء «${taskToCancel.title}»؟",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.confirmTaskCancellation() },
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("confirm_cancel_task_button"),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = StatusCancelled,
+                        contentColor = Color.White
+                    )
+                ) {
+                    Text("تأكيد الإلغاء", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { viewModel.dismissTaskCancellationConfirmation() },
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("dismiss_cancel_task_button"),
+                    border = BorderStroke(1.dp, CyberBorderGlow)
+                ) {
+                    Text("إبقاء العنصر", color = CyberTextPrimary)
+                }
+            }
         )
     }
 

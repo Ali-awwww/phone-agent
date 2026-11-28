@@ -135,7 +135,8 @@ fun PhoneAgentApp(
             actionLogRepository = appContainer.actionLogRepository,
             agentPolicy = appContainer.agentPolicy,
             executionController = executionController,
-            floatingControlManager = floatingControlManager
+            floatingControlManager = floatingControlManager,
+            sensitiveActionGate = appContainer.sensitiveActionGate
         )
     }
 
@@ -153,6 +154,7 @@ fun PhoneAgentApp(
             floatingControlManager = floatingControlManager,
             appContext = applicationContext,
             agentPolicy = appContainer.agentPolicy,
+            sensitiveActionGate = appContainer.sensitiveActionGate,
             phoneFileManager = appContainer.phoneFileManager
         )
     )

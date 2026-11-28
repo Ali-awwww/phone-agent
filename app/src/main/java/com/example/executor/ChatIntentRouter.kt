@@ -2,6 +2,7 @@ package com.example.executor
 
 import com.example.data.local.AgentTaskType
 import com.example.model.AppFolder
+import org.json.JSONObject
 import java.util.Calendar
 
 sealed interface ChatRouteIntent {
@@ -473,26 +474,28 @@ object ChatIntentRouter {
         if (start >= 0 && end > start) {
             val jsonSlice = cleaned.substring(start, end + 1)
             runCatching {
-                val actionMatch = Regex("\"action\"\\s*:\\s*\"([A-Za-z_]+)\"").find(jsonSlice)
-                val actionStr = actionMatch?.groupValues?.getOrNull(1)?.uppercase() ?: "WAIT"
+                val json = JSONObject(jsonSlice)
+                val actionStr = json.optString("action", "").trim().uppercase()
                 val action = GameGestureAction.entries.firstOrNull { it.name == actionStr }
-                    ?: GameGestureAction.WAIT
+                    ?: return GameActionDecision(
+                        action = GameGestureAction.WAIT,
+                        reasonAr = "إجراء غير معروف في رد النموذج (${actionStr.ifBlank { "فارغ" }}) — تم الإيقاف احترازياً."
+                    )
 
-                val textMatch = Regex("\"text\"\\s*:\\s*\"([^\"]*)\"").find(jsonSlice)
-                val reasonMatch = Regex("\"reasonAr\"\\s*:\\s*\"([^\"]*)\"").find(jsonSlice)
-                val xMatch = Regex("\"x\"\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)").find(jsonSlice)
-                val yMatch = Regex("\"y\"\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)").find(jsonSlice)
-                val endXMatch = Regex("\"endX\"\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)").find(jsonSlice)
-                val endYMatch = Regex("\"endY\"\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)").find(jsonSlice)
+                fun safeCoord(key: String, defaultVal: Float): Float {
+                    val d = json.optDouble(key, defaultVal.toDouble())
+                    if (d.isNaN() || d.isInfinite()) return defaultVal
+                    return d.toFloat().coerceIn(0.02f, 0.98f)
+                }
 
                 return GameActionDecision(
                     action = action,
-                    targetText = textMatch?.groupValues?.getOrNull(1).orEmpty(),
-                    x = xMatch?.groupValues?.getOrNull(1)?.toFloatOrNull()?.coerceIn(0.02f, 0.98f) ?: 0.5f,
-                    y = yMatch?.groupValues?.getOrNull(1)?.toFloatOrNull()?.coerceIn(0.02f, 0.98f) ?: 0.5f,
-                    endX = endXMatch?.groupValues?.getOrNull(1)?.toFloatOrNull()?.coerceIn(0.02f, 0.98f) ?: 0.5f,
-                    endY = endYMatch?.groupValues?.getOrNull(1)?.toFloatOrNull()?.coerceIn(0.02f, 0.98f) ?: 0.25f,
-                    reasonAr = reasonMatch?.groupValues?.getOrNull(1).orEmpty()
+                    targetText = json.optString("text", ""),
+                    x = safeCoord("x", 0.5f),
+                    y = safeCoord("y", 0.5f),
+                    endX = safeCoord("endX", 0.5f),
+                    endY = safeCoord("endY", 0.25f),
+                    reasonAr = json.optString("reasonAr", "")
                 )
             }
         }

@@ -8,6 +8,7 @@ import com.example.executor.CommandExecutor
 import com.example.files.PhoneFileManager
 import com.example.organizer.AppOrganizer
 import com.example.policy.AgentPolicy
+import com.example.policy.SensitiveActionGate
 import com.example.security.FirebaseAppCheckClient
 import com.example.verifier.ScreenVerifier
 import com.example.voice.VoiceAssistantManager
@@ -23,6 +24,10 @@ class AppContainer(context: Context) {
 
     val agentPolicy by lazy {
         AgentPolicy()
+    }
+
+    val sensitiveActionGate by lazy {
+        SensitiveActionGate(agentPolicy = agentPolicy)
     }
 
     val actionLogRepository by lazy {
@@ -48,7 +53,8 @@ class AppContainer(context: Context) {
             actionLogRepository = actionLogRepository,
             geminiRepository = geminiRepository,
             screenVerifier = screenVerifier,
-            agentPolicy = agentPolicy
+            agentPolicy = agentPolicy,
+            sensitiveActionGate = sensitiveActionGate
         )
     }
 

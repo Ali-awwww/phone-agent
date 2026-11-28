@@ -41,6 +41,15 @@ interface ChatMessageDao {
     @Query("SELECT * FROM chat_messages ORDER BY createdAt ASC, id ASC")
     fun observeAllMessages(): Flow<List<ChatMessageEntity>>
 
+    @Query(
+        "SELECT * FROM (SELECT * FROM chat_messages ORDER BY createdAt DESC, id DESC LIMIT :limit) " +
+            "ORDER BY createdAt ASC, id ASC"
+    )
+    fun observeRecentMessages(limit: Int): Flow<List<ChatMessageEntity>>
+
+    @Query("SELECT COUNT(*) FROM chat_messages")
+    fun observeMessagesCount(): Flow<Int>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMessage(message: ChatMessageEntity): Long
 
@@ -95,7 +104,15 @@ class ChatHistoryRepository(
     private val agentTaskDao: AgentTaskDao
 ) {
     val messagesFlow: Flow<List<ChatMessageEntity>> = chatMessageDao.observeAllMessages()
+    val messagesCountFlow: Flow<Int> = chatMessageDao.observeMessagesCount()
     val activeTasksFlow: Flow<List<AgentTaskEntity>> = agentTaskDao.observeActiveTasks()
+
+    fun observeRecentMessages(limit: Int = DEFAULT_CHAT_PAGE_SIZE): Flow<List<ChatMessageEntity>> =
+        chatMessageDao.observeRecentMessages(limit.coerceAtLeast(1))
+
+    companion object {
+        const val DEFAULT_CHAT_PAGE_SIZE = 60
+    }
 
     suspend fun addUserMessage(text: String): Long {
         return chatMessageDao.insertMessage(

@@ -54,9 +54,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.R
 import com.example.model.AgentPlan
 import com.example.model.AgentPlanStep
 import com.example.model.StepActionType
@@ -86,6 +88,7 @@ fun CyberPlanCard(
     executionMessage: String,
     onNewPlan: () -> Unit,
     onExecutePlan: () -> Unit,
+    onExecuteNextStep: () -> Unit = onExecutePlan,
     onCancelExecution: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -193,6 +196,35 @@ fun CyberPlanCard(
                 )
             }
 
+            if (!isPlanComplete && !plan.isCancelled) {
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = onExecuteNextStep,
+                    enabled = !isExecuting && !plan.isCancelled && !isPlanComplete,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("execute_next_step_button"),
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, CyberElectricCyan),
+                    contentPadding = PaddingValues(horizontal = 16.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.PlayArrow,
+                        contentDescription = null,
+                        tint = CyberElectricCyan,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = stringResource(R.string.execute_next_button),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = CyberElectricCyan
+                    )
+                }
+            }
+
             Spacer(modifier = Modifier.height(8.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -247,6 +279,7 @@ fun CyberPlanCard(
 @Composable
 private fun CyberStepRow(step: AgentPlanStep, isExecuting: Boolean) {
     val isDone = step.status == StepStatus.COMPLETED
+    val isUnverified = step.status == StepStatus.UNVERIFIED
     val isCurrent = isExecuting && (step.status == StepStatus.RUNNING || step.status == StepStatus.VERIFYING)
     val isFailed = step.status == StepStatus.FAILED || step.status == StepStatus.CANCELLED
     val stepIcon = when (step.actionType) {
@@ -266,6 +299,7 @@ private fun CyberStepRow(step: AgentPlanStep, isExecuting: Boolean) {
         shape = MaterialTheme.shapes.small,
         color = when {
             isFailed -> StatusCancelledContainer
+            isUnverified -> StatusPendingContainer
             isDone -> StatusSuccessContainer
             isCurrent -> StatusCyanInfoContainer
             else -> CyberSurfaceElevated
@@ -274,6 +308,7 @@ private fun CyberStepRow(step: AgentPlanStep, isExecuting: Boolean) {
             1.dp,
             when {
                 isFailed -> StatusCancelled.copy(alpha = 0.6f)
+                isUnverified -> StatusPending.copy(alpha = 0.7f)
                 isDone -> StatusSuccess.copy(alpha = 0.6f)
                 isCurrent -> CyberElectricCyan
                 else -> CyberBorderGlow
@@ -288,6 +323,7 @@ private fun CyberStepRow(step: AgentPlanStep, isExecuting: Boolean) {
                 shape = CircleShape,
                 color = when {
                     isFailed -> StatusCancelled
+                    isUnverified -> StatusPending
                     isDone -> StatusSuccess
                     isCurrent -> CyberElectricCyan
                     else -> CyberElectricBlue
@@ -307,6 +343,13 @@ private fun CyberStepRow(step: AgentPlanStep, isExecuting: Boolean) {
                     } else if (isFailed) {
                         Icon(
                             imageVector = Icons.Filled.Cancel,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(17.dp)
+                        )
+                    } else if (isUnverified) {
+                        Icon(
+                            imageVector = Icons.Outlined.PendingActions,
                             contentDescription = null,
                             tint = Color.White,
                             modifier = Modifier.size(17.dp)
@@ -341,6 +384,7 @@ private fun CyberStepRow(step: AgentPlanStep, isExecuting: Boolean) {
                     style = MaterialTheme.typography.labelSmall,
                     color = when {
                         isFailed -> StatusCancelled
+                        isUnverified -> StatusPending
                         isDone -> StatusSuccess
                         else -> CyberSoftCyan
                     }
@@ -371,9 +415,11 @@ private fun CyberStepRow(step: AgentPlanStep, isExecuting: Boolean) {
 fun SensitiveStepApprovalDialog(
     step: AgentPlanStep,
     fullPlan: AgentPlan?,
+    nextStep: AgentPlanStep? = fullPlan?.steps?.firstOrNull { it.stepNumber > step.stepNumber },
     onApprove: () -> Unit,
     onReject: () -> Unit
 ) {
+    val resolvedNextStep = nextStep ?: fullPlan?.steps?.firstOrNull { it.stepNumber > step.stepNumber }
     AlertDialog(
         onDismissRequest = onReject,
         containerColor = CyberSurfaceNavy,
@@ -422,6 +468,42 @@ fun SensitiveStepApprovalDialog(
                         )
                     }
                 }
+                if (resolvedNextStep != null) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("approval_next_step_preview"),
+                        shape = MaterialTheme.shapes.small,
+                        color = StatusCyanInfoContainer,
+                        border = BorderStroke(1.dp, CyberElectricCyan.copy(alpha = 0.5f))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text(
+                                text = "الخطوة التالية في الخطة: ${resolvedNextStep.stepNumber}. ${resolvedNextStep.titleAr}",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = CyberElectricCyan
+                            )
+                            if (resolvedNextStep.descriptionAr.isNotBlank()) {
+                                Text(
+                                    text = resolvedNextStep.descriptionAr,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = CyberTextSecondary
+                                )
+                            }
+                        }
+                    }
+                } else if (fullPlan != null && fullPlan.steps.isNotEmpty()) {
+                    Text(
+                        text = "هذه هي الخطوة الأخيرة في الخطة الحالية.",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = CyberSoftCyan,
+                        modifier = Modifier.testTag("approval_next_step_preview")
+                    )
+                }
                 if (fullPlan != null && fullPlan.steps.isNotEmpty()) {
                     Text(
                         text = "ملخص الخطة الكاملة (${fullPlan.steps.size} خطوات):",
@@ -432,7 +514,8 @@ fun SensitiveStepApprovalDialog(
                         Text(
                             text = "${s.stepNumber}. ${s.titleAr}",
                             style = MaterialTheme.typography.bodySmall,
-                            color = CyberTextSecondary
+                            color = if (s.stepNumber == step.stepNumber) CyberElectricCyan else CyberTextSecondary,
+                            fontWeight = if (s.stepNumber == step.stepNumber) FontWeight.Bold else FontWeight.Normal
                         )
                     }
                 }

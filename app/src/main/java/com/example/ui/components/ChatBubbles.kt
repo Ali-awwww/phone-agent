@@ -130,7 +130,12 @@ fun ChatLiveExecutionBubble(
     canPauseOrTakeOver: Boolean,
     actions: ChatLiveExecutionActions,
     modifier: Modifier = Modifier,
-    isHandedOver: Boolean = false
+    isHandedOver: Boolean = false,
+    doingNowAr: String = "",
+    nextStepAr: String = "",
+    waitingForUserAr: String = "",
+    elapsedSeconds: Int = 0,
+    timeoutSeconds: Int = 65
 ) {
     val bubbleShape = RoundedCornerShape(
         topStart = 6.dp,
@@ -153,15 +158,15 @@ fun ChatLiveExecutionBubble(
     ) {
         Surface(
             modifier = Modifier
-                .widthIn(max = 256.dp)
+                .widthIn(max = 320.dp)
                 .clip(bubbleShape),
             shape = bubbleShape,
             color = CyberSurfaceNavy,
             border = BorderStroke(0.85.dp, borderColor)
         ) {
             Column(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
-                verticalArrangement = Arrangement.spacedBy(5.dp)
+                modifier = Modifier.padding(horizontal = 11.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -182,7 +187,7 @@ fun ChatLiveExecutionBubble(
                             text = when {
                                 isHandedOver -> "سلّمتك التحكم"
                                 isPaused -> "متوقف مؤقتاً"
-                                else -> "وكيل الهاتف"
+                                else -> "الحالة الحية للوكيل"
                             },
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
@@ -190,19 +195,53 @@ fun ChatLiveExecutionBubble(
                         )
                     }
 
-                    if (!isHandedOver && !isPaused) {
-                        AnimatedTypingDots()
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (elapsedSeconds > 0 && !isPaused && !isHandedOver) {
+                            Text(
+                                text = "${elapsedSeconds}ث / ${timeoutSeconds}ث",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CyberSoftCyan,
+                                modifier = Modifier.testTag("live_elapsed_timer")
+                            )
+                        }
+                        if (!isHandedOver && !isPaused) {
+                            AnimatedTypingDots()
+                        }
                     }
                 }
 
-                Text(
-                    text = statusText,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = CyberTextPrimary,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    softWrap = true
-                )
+                val resolvedDoingNow = doingNowAr.ifBlank { statusText }
+                val resolvedNext = nextStepAr.ifBlank {
+                    if (isHandedOver) "استئناف الوكيل عند ضغطك على «استئناف»"
+                    else if (isPaused) "استئناف التنفيذ عند ضغطك على «استئناف»"
+                    else "التحقق من النتيجة وتحديثك بالتقرير النهائي"
+                }
+                val resolvedWaiting = waitingForUserAr.ifBlank {
+                    when {
+                        isHandedOver -> "إكمالك للخطوة ثم ضغط «استئناف»"
+                        isPaused -> "قرارك: «استئناف» أو «إلغاء»"
+                        else -> "لا شيء حالياً — يمكنك الإيقاف أو الإلغاء في أي لحظة"
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = CyberSurfaceElevated.copy(alpha = 0.85f),
+                    border = BorderStroke(0.7.dp, CyberBorderGlow.copy(alpha = 0.45f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 7.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        LiveStatusRow(label = "ماذا أفعل الآن:", value = resolvedDoingNow, accent = CyberElectricCyan)
+                        LiveStatusRow(label = "الخطوة التالية:", value = resolvedNext, accent = CyberSoftCyan)
+                        LiveStatusRow(label = "ماذا أنتظر منك:", value = resolvedWaiting, accent = if (isPaused) StatusPending else CyberTextSecondary)
+                    }
+                }
 
                 FlowRow(
                     modifier = Modifier.fillMaxWidth(),
@@ -808,4 +847,28 @@ private fun parseTaskCards(payloadJson: String): List<ChatTaskCardItem> {
             }
         }
     }.getOrDefault(emptyList())
+}
+
+@Composable
+private fun LiveStatusRow(
+    label: String,
+    value: String,
+    accent: Color
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            color = accent
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            color = CyberTextPrimary,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            softWrap = true
+        )
+    }
 }

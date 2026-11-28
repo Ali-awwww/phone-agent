@@ -42,6 +42,8 @@ class GameTapSafetyTest {
         }
         val fakeDao = object : ActionLogDao {
             override fun observeAllLogs(): Flow<List<ActionLogEntity>> = flowOf(emptyList())
+            override fun observePagedLogs(limit: Int): Flow<List<ActionLogEntity>> = flowOf(emptyList())
+            override fun observeLogsCount(): Flow<Int> = flowOf(0)
             override suspend fun insertLog(log: ActionLogEntity): Long = 1L
             override suspend fun updateStatus(id: Long, status: String, canUndo: Boolean) {}
             override suspend fun markUndone(id: Long, status: String) {}

@@ -19,6 +19,8 @@ import com.example.model.StepVerificationStatus
 import com.example.organizer.AppOrganizer
 import com.example.organizer.InstalledAppInfo
 import com.example.policy.AgentPolicy
+import com.example.policy.GateApprovalToken
+import com.example.policy.SensitiveActionGate
 import com.example.service.ScreenStateBridge
 import com.example.verifier.ScreenVerifier
 import kotlinx.coroutines.delay
@@ -32,7 +34,8 @@ data class StepExecutionOutcome(
     val logId: Long,
     val canUndo: Boolean = false,
     val undoPayload: String? = null,
-    val rolledBack: Boolean = false
+    val rolledBack: Boolean = false,
+    val unableToVerify: Boolean = verification.status == StepVerificationStatus.UNABLE_TO_VERIFY
 )
 
 class CommandExecutor(
@@ -40,7 +43,8 @@ class CommandExecutor(
     private val actionLogRepository: ActionLogRepository,
     private val geminiRepository: GeminiRepository,
     private val screenVerifier: ScreenVerifier,
-    private val agentPolicy: AgentPolicy = AgentPolicy()
+    private val agentPolicy: AgentPolicy = AgentPolicy(),
+    private val sensitiveActionGate: SensitiveActionGate = SensitiveActionGate(agentPolicy)
 ) {
     fun findMatchingAppPackage(appNameOrPackage: String, installedApps: List<InstalledAppInfo>): InstalledAppInfo? {
         return screenVerifier.matchRealInstalledApp(appNameOrPackage, installedApps)
@@ -48,25 +52,37 @@ class CommandExecutor(
 
     suspend fun executeStep(
         step: AgentPlanStep,
-        installedApps: List<InstalledAppInfo>
+        installedApps: List<InstalledAppInfo>,
+        approvalToken: GateApprovalToken? = null
     ): StepExecutionOutcome {
-        // 0. فحص سياسة الوكيل الصارمة قبل أي خطوة
-        val policyCheck = agentPolicy.validateStep(step)
-        if (!policyCheck.allowed) {
+        // 0. فحص بوابة الموافقة والسياسة الموحّدة في طبقة التنفيذ قبل أي خطوة
+        val gateResult = sensitiveActionGate.authorizeStep(
+            step = step,
+            existingToken = approvalToken
+        )
+        if (!gateResult.approved) {
+            val actionTypeTag = when {
+                gateResult.blockedByPolicy -> "POLICY_BLOCKED_${step.actionType.name}"
+                gateResult.timedOut -> "APPROVAL_TIMEOUT_${step.actionType.name}"
+                else -> "USER_REJECTED_SENSITIVE_${step.actionType.name}"
+            }
+            val reason = gateResult.reasonAr.ifBlank {
+                "تم إيقاف الخطوة «${step.titleAr}» لعدم اكتمال الموافقة."
+            }
             val logId = actionLogRepository.logAction(
                 title = step.titleAr,
-                details = "رُفضت الخطوة وفق سياسة الأمان: ${policyCheck.reasonAr}",
+                details = reason,
                 status = ActionStatus.CANCELLED,
-                actionType = "POLICY_BLOCKED_${step.actionType.name}"
+                actionType = actionTypeTag
             )
             return StepExecutionOutcome(
                 success = false,
-                messageAr = policyCheck.reasonAr,
+                messageAr = reason,
                 verification = ScreenVerificationResult(
                     verified = false,
                     status = StepVerificationStatus.VERIFICATION_FAILED,
-                    explanationAr = policyCheck.reasonAr,
-                    sensitiveUiDetected = true
+                    explanationAr = reason,
+                    sensitiveUiDetected = gateResult.blockedByPolicy || gateResult.requiresApproval
                 ),
                 logId = logId
             )
@@ -141,10 +157,14 @@ class CommandExecutor(
             postSnapshot = postSnapshot
         )
 
-        // 4. التراجع التلقائي الآمن إذا فشل الفعل أو فشل التحقق على الشاشة الفعلية
+        // 4. التراجع التلقائي الآمن فقط عند فشل التنفيذ أو فشل التحقق الصريح أو رصد واجهة حساسة
         var rolledBack = false
         var rollbackNote = ""
-        if (!executed || !verification.verified || verification.sensitiveUiDetected) {
+        val isExplicitFailure = !executed ||
+            verification.sensitiveUiDetected ||
+            verification.status == StepVerificationStatus.VERIFICATION_FAILED ||
+            verification.status == StepVerificationStatus.NOT_FOUND_ON_SCREEN
+        if (isExplicitFailure) {
             if (scheduledReminderId != null) {
                 rolledBack = cancelScheduledReminder(scheduledReminderId)
                 if (rolledBack) {
@@ -163,20 +183,29 @@ class CommandExecutor(
             }
         }
 
+        val isUnableToVerify = executed &&
+            verification.status == StepVerificationStatus.UNABLE_TO_VERIFY &&
+            !verification.sensitiveUiDetected
         val overallSuccess = executed && verification.verified && !verification.sensitiveUiDetected
         val finalStatus = when {
             rolledBack -> ActionStatus.UNDONE
             overallSuccess -> ActionStatus.SUCCESS
             verification.sensitiveUiDetected -> ActionStatus.CANCELLED
+            isUnableToVerify -> ActionStatus.UNVERIFIED
             else -> ActionStatus.FAILED
         }
 
         val truthfulSummary = buildString {
-            if (overallSuccess) {
-                append("نجح: $messageAr")
-            } else {
-                append("ما تم: $messageAr")
-                append(" | لماذا فشل: ${verification.explanationAr}")
+            when {
+                overallSuccess -> append("نجح: $messageAr")
+                isUnableToVerify -> {
+                    append("تم الإجراء: $messageAr")
+                    append(" | تحذير التحقق: ${verification.explanationAr}")
+                }
+                else -> {
+                    append("ما تم: $messageAr")
+                    append(" | لماذا فشل: ${verification.explanationAr}")
+                }
             }
             append(rollbackNote)
         }
@@ -186,7 +215,7 @@ class CommandExecutor(
             details = truthfulSummary,
             status = finalStatus,
             actionType = step.actionType.name,
-            canUndo = canUndo && overallSuccess,
+            canUndo = canUndo && (overallSuccess || isUnableToVerify),
             undoPayload = undoPayload
         )
 
@@ -195,9 +224,10 @@ class CommandExecutor(
             messageAr = truthfulSummary,
             verification = verification,
             logId = logId,
-            canUndo = canUndo && overallSuccess,
+            canUndo = canUndo && (overallSuccess || isUnableToVerify),
             undoPayload = undoPayload,
-            rolledBack = rolledBack
+            rolledBack = rolledBack,
+            unableToVerify = isUnableToVerify
         )
     }
 
@@ -271,9 +301,9 @@ class CommandExecutor(
         return try {
             context.startActivity(intent)
             val timeStr = String.format("%02d:%02d", hour, minute)
-            true to "تم فتح ضبط المنبه على الساعة $timeStr ($label)."
+            true to "فُتحت واجهة المنبه على الساعة $timeStr ($label) — أكمل الإعداد والتأكيد."
         } catch (e: Exception) {
-            false to "لا يوجد تطبيق ساعة متاح لضبط المنبه: ${e.localizedMessage}"
+            false to "لا يوجد تطبيق ساعة متاح لفتح واجهة المنبه: ${e.localizedMessage}"
         }
     }
 
@@ -339,18 +369,17 @@ class CommandExecutor(
 
     fun cancelScheduledReminder(reminderId: Int): Boolean {
         return try {
-            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+                ?: return false
             val receiverIntent = Intent(context, ReminderReceiver::class.java)
             val pendingIntent = PendingIntent.getBroadcast(
                 context,
                 reminderId,
                 receiverIntent,
                 PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
-            )
-            if (pendingIntent != null) {
-                alarmManager.cancel(pendingIntent)
-                pendingIntent.cancel()
-            }
+            ) ?: return false
+            alarmManager.cancel(pendingIntent)
+            pendingIntent.cancel()
             true
         } catch (_: Exception) {
             false
@@ -380,7 +409,7 @@ class CommandExecutor(
 
         return try {
             context.startActivity(intent)
-            true to "تم فتح نافذة إرسال الرسالة بمحتوى: «$messageBody» للمراجعة النهائية."
+            true to "فُتحت واجهة الرسالة بمحتوى «$messageBody» — راجع وأرسل يدوياً."
         } catch (e: Exception) {
             false to "تعذر فتح تطبيق المراسلة: ${e.localizedMessage}"
         }
@@ -402,7 +431,7 @@ class CommandExecutor(
         val intent = Intent(action).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
         return try {
             context.startActivity(intent)
-            true to "تم فتح لوحة الإعدادات المطلوبة بأمان."
+            true to "فُتحت واجهة الإعدادات المطلوبة — أكمل التعديل والتأكيد."
         } catch (e: Exception) {
             false to "تعذر فتح الإعدادات: ${e.localizedMessage}"
         }

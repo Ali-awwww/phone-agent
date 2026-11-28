@@ -7,6 +7,7 @@ import com.example.model.AppFolder
 import com.example.model.ScreenSnapshot
 import com.example.model.ScreenVerificationResult
 import com.example.model.StepActionType
+import com.example.model.StepVerificationStatus
 import com.example.security.AppCheckTokenClient
 import com.example.security.AppCheckVerificationException
 import com.example.security.DEFAULT_APP_CHECK_RETRY_DELAY_MS
@@ -43,6 +44,7 @@ const val PRIMARY_GEMINI_MODEL = "gemini-3.8-flash"
 const val FALLBACK_LITE_GEMINI_MODEL = "gemini-3.5-flash-lite"
 const val THIRD_FALLBACK_GEMINI_MODEL = "gemini-4-hydrogen"
 const val MSG_MODEL_BUSY_RETRYING_AR = "النموذج مشغول الآن، أعيد المحاولة..."
+const val TOTAL_GEMINI_COMMAND_TIMEOUT_MS = 65_000L
 val DEFAULT_OVERLOAD_BACKOFF_MS: List<Long> = listOf(1_000L, 2_000L)
 
 fun getModelChainForTier(tier: ModelRouteTier): List<String> = when (tier) {
@@ -394,7 +396,8 @@ class GeminiRepository internal constructor(
     private val maxAppCheckAttempts: Int = MAX_APP_CHECK_ATTEMPTS,
     private val retryDelayMs: Long = DEFAULT_APP_CHECK_RETRY_DELAY_MS,
     private val overloadRetryDelaysMs: List<Long> = DEFAULT_OVERLOAD_BACKOFF_MS,
-    private val delayFn: suspend (Long) -> Unit = { delay(it) }
+    private val delayFn: suspend (Long) -> Unit = { delay(it) },
+    private val totalChainTimeoutMs: Long = TOTAL_GEMINI_COMMAND_TIMEOUT_MS
 ) {
     constructor(
         appCheckClient: AppCheckTokenClient = FirebaseAppCheckClient()
@@ -493,63 +496,65 @@ class GeminiRepository internal constructor(
     )
 
     internal suspend fun <T> withModelChainResilience(
-        timeoutMs: Long,
+        timeoutMs: Long = totalChainTimeoutMs,
         candidates: List<ModelCallCandidate<T>>,
         onStatusUpdate: (suspend (String) -> Unit)? = null
     ): ResilientResult<T> {
         require(candidates.isNotEmpty()) { "candidates must not be empty" }
-        var lastError: Exception? = null
-        var busyStatusSent = false
+        val effectiveTotalTimeoutMs = minOf(timeoutMs, totalChainTimeoutMs).coerceAtLeast(1L)
 
-        for ((index, candidate) in candidates.withIndex()) {
-            currentCoroutineContext().ensureActive()
-            try {
-                val result = withAppCheckRecovery {
-                    withTimeout(timeoutMs) { candidate.call() }
-                }
-                return ResilientResult(
-                    value = result,
-                    modelUsed = candidate.modelName,
-                    usedFallback = index > 0
-                )
-            } catch (e: CancellationException) {
-                if (e !is TimeoutCancellationException) throw e
+        return withTimeout(effectiveTotalTimeoutMs) {
+            var lastError: Exception? = null
+            var busyStatusSent = false
+
+            for ((index, candidate) in candidates.withIndex()) {
                 currentCoroutineContext().ensureActive()
-                lastError = e
-            } catch (e: Exception) {
-                val canSwitch = isModelOverloadError(e) || isModelUnavailableError(e)
-                if (!canSwitch) {
+                try {
+                    val result = withAppCheckRecovery {
+                        candidate.call()
+                    }
+                    return@withTimeout ResilientResult(
+                        value = result,
+                        modelUsed = candidate.modelName,
+                        usedFallback = index > 0
+                    )
+                } catch (e: CancellationException) {
                     throw e
+                } catch (e: Exception) {
+                    val canSwitch = isModelOverloadError(e) || isModelUnavailableError(e)
+                    if (!canSwitch) {
+                        throw e
+                    }
+                    lastError = e
                 }
-                lastError = e
-            }
 
-            if (index < candidates.lastIndex) {
-                val nextCandidate = candidates[index + 1]
-                val isUnavailable = isModelUnavailableError(lastError)
-                val waitMs = if (isUnavailable) {
-                    0L
-                } else {
-                    overloadRetryDelaysMs.getOrElse(index) {
-                        overloadRetryDelaysMs.lastOrNull() ?: 2_000L
+                if (index < candidates.lastIndex) {
+                    val nextCandidate = candidates[index + 1]
+                    val isUnavailable = isModelUnavailableError(lastError)
+                    val waitMs = if (isUnavailable) {
+                        0L
+                    } else {
+                        overloadRetryDelaysMs.getOrElse(index) {
+                            overloadRetryDelaysMs.lastOrNull() ?: 2_000L
+                        }
+                    }
+                    safeLogW(
+                        TAG,
+                        "Model ${candidate.modelName} unavailable/overloaded; switching (${index + 1}/${candidates.lastIndex}) to ${nextCandidate.modelName} after ${waitMs}ms.",
+                        lastError
+                    )
+                    if (!busyStatusSent) {
+                        onStatusUpdate?.invoke(MSG_MODEL_BUSY_RETRYING_AR)
+                        busyStatusSent = true
+                    }
+                    if (waitMs > 0L) {
+                        delayFn(waitMs)
                     }
                 }
-                safeLogW(
-                    TAG,
-                    "Model ${candidate.modelName} unavailable/overloaded; switching (${index + 1}/${candidates.lastIndex}) to ${nextCandidate.modelName} after ${waitMs}ms.",
-                    lastError
-                )
-                if (!busyStatusSent) {
-                    onStatusUpdate?.invoke(MSG_MODEL_BUSY_RETRYING_AR)
-                    busyStatusSent = true
-                }
-                if (waitMs > 0L) {
-                    delayFn(waitMs)
-                }
             }
-        }
 
-        throw lastError ?: IllegalStateException("تعذر الوصول للنموذج بسبب الضغط المؤقت.")
+            throw lastError ?: IllegalStateException("تعذر الوصول للنموذج بسبب الضغط المؤقت.")
+        }
     }
 
     internal suspend fun <T> withModelResilience(
@@ -608,7 +613,7 @@ class GeminiRepository internal constructor(
 
             val chain = getModelChainForTier(ModelRouteTier.FLASH)
             val result = withModelChainResilience(
-                timeoutMs = 60_000L,
+                timeoutMs = totalChainTimeoutMs,
                 onStatusUpdate = onStatusUpdate,
                 candidates = listOf(
                     ModelCallCandidate(chain[0]) { modelClient.generatePlanJson(prompt) },
@@ -665,7 +670,7 @@ class GeminiRepository internal constructor(
             }
             val chain = getModelChainForTier(ModelRouteTier.FLASH)
             val result = withModelChainResilience(
-                timeoutMs = 60_000L,
+                timeoutMs = totalChainTimeoutMs,
                 onStatusUpdate = onStatusUpdate,
                 candidates = listOf(
                     ModelCallCandidate(chain[0]) { modelClient.generateAudioPlanJson(audioBytes, mimeType, prompt) },
@@ -703,28 +708,39 @@ class GeminiRepository internal constructor(
     ): ScreenVerificationResult {
         if (snapshot == null) {
             return ScreenVerificationResult(
-                verified = true,
-                explanationAr = "تم تنفيذ الخطوة عبر واجهة النظام الرسمية (لا تتوفر لقطة شاشة إضافية من خدمة الوصول)."
+                verified = false,
+                status = StepVerificationStatus.UNABLE_TO_VERIFY,
+                explanationAr = "تعذّر التحقق من الشاشة لعدم توفر لقطة شاشة من خدمة إمكانية الوصول."
             )
         }
         if (snapshot.hasSensitiveSecurityField) {
             return ScreenVerificationResult(
                 verified = false,
+                status = StepVerificationStatus.VERIFICATION_FAILED,
                 explanationAr = "تم رصد حقل كلمة مرور أو بصمة أو دفع على الشاشة. توقف الوكيل لحماية أمانك.",
                 suggestedFixAr = "يرجى إكمال هذه الخطوة يدوياً ثم تأكيد المتابعة.",
                 sensitiveUiDetected = true
             )
         }
         return try {
+            val isUiLaunchStep = step.actionType in listOf(
+                StepActionType.SET_ALARM,
+                StepActionType.SEND_MESSAGE,
+                StepActionType.CHANGE_SETTING
+            )
             val prompt = buildString {
                 appendLine("الخطوة المنفذة: ${step.titleAr} (${step.descriptionAr})")
+                appendLine("نوع الإجراء: ${step.actionType.name}")
                 appendLine("التحقق المتوقع: ${step.expectedScreenHint}")
+                if (isUiLaunchStep) {
+                    appendLine("تنبيه حاسم: مجرد فتح واجهة المنبه أو الرسالة أو الإعدادات لا يعني إتمام الضبط أو الإرسال؛ أعد verified=true فقط إذا ظهر تأكيد حفظ أو إتمام فعلي على الشاشة، وإلا أعد verified=false.")
+                }
                 appendLine("محتوى الشاشة المرصود الآن:")
                 appendLine(snapshot.toCompactPromptText())
             }
             val chain = getModelChainForTier(ModelRouteTier.FLASH)
             val result = withModelChainResilience(
-                timeoutMs = 45_000L,
+                timeoutMs = totalChainTimeoutMs,
                 candidates = listOf(
                     ModelCallCandidate(chain[0]) { modelClient.generateVerificationJson(prompt) },
                     ModelCallCandidate(chain[1]) { modelClient.generateVerificationJsonFallback(prompt) },
@@ -735,17 +751,12 @@ class GeminiRepository internal constructor(
                 TAG,
                 "ModelRoute tier=FLASH intended=${chain[0]} actual=${result.modelUsed} fallback=${result.usedFallback} (verifyScreen)"
             )
-            val json = JSONObject(result.value)
-            ScreenVerificationResult(
-                verified = json.optBoolean("verified", true),
-                explanationAr = json.optString("explanationAr", "تم فحص الشاشة بنجاح."),
-                suggestedFixAr = json.optString("suggestedFixAr", ""),
-                sensitiveUiDetected = json.optBoolean("sensitiveUiDetected", false)
-            )
+            parseVerificationResponse(result.value)
         } catch (e: CancellationException) {
             if (e !is TimeoutCancellationException) throw e
             ScreenVerificationResult(
                 verified = false,
+                status = StepVerificationStatus.VERIFICATION_FAILED,
                 explanationAr = "انتهت مهلة التحقق التلقائي من الشاشة.",
                 suggestedFixAr = "تأكد من حالة الشاشة ثم اختر متابعة أو إلغاء."
             )
@@ -753,8 +764,70 @@ class GeminiRepository internal constructor(
             safeLogE(TAG, "Screen verification failed", e)
             ScreenVerificationResult(
                 verified = false,
-                explanationAr = "تعذر التحقق التلقائي من الشاشة مؤقتاً.",
+                status = StepVerificationStatus.VERIFICATION_FAILED,
+                explanationAr = "تعذر التحقق التلقائي من الشاشة: لا يوجد دليل كافٍ على نجاح الخطوة.",
                 suggestedFixAr = "تأكد من حالة الشاشة ثم اختر متابعة أو إلغاء."
+            )
+        }
+    }
+
+    internal fun parseVerificationResponse(raw: String): ScreenVerificationResult {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) {
+            return ScreenVerificationResult(
+                verified = false,
+                status = StepVerificationStatus.VERIFICATION_FAILED,
+                explanationAr = "فشل التحقق: أعاد النموذج رداً فارغاً دون دليل.",
+                suggestedFixAr = "تحقق من الشاشة بنفسك ثم أعد المحاولة."
+            )
+        }
+        val cleaned = trimmed
+            .removePrefix("```json")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
+        val start = cleaned.indexOf('{')
+        val end = cleaned.lastIndexOf('}')
+        if (start < 0 || end <= start) {
+            return ScreenVerificationResult(
+                verified = false,
+                status = StepVerificationStatus.VERIFICATION_FAILED,
+                explanationAr = "فشل التحقق: رد غير صالح أو غير قابل للتحليل.",
+                suggestedFixAr = "تحقق من الشاشة بنفسك ثم أعد المحاولة."
+            )
+        }
+        return try {
+            val json = JSONObject(cleaned.substring(start, end + 1))
+            if (!json.has("verified")) {
+                return ScreenVerificationResult(
+                    verified = false,
+                    status = StepVerificationStatus.VERIFICATION_FAILED,
+                    explanationAr = "فشل التحقق: خلا الرد من نتيجة التحقق الصريحة (verified).",
+                    suggestedFixAr = "تحقق من الشاشة بنفسك ثم أعد المحاولة."
+                )
+            }
+            val verified = json.optBoolean("verified", false)
+            val sensitive = json.optBoolean("sensitiveUiDetected", false)
+            val finalVerified = verified && !sensitive
+            ScreenVerificationResult(
+                verified = finalVerified,
+                status = if (finalVerified) {
+                    StepVerificationStatus.VERIFIED_ON_SCREEN
+                } else {
+                    StepVerificationStatus.VERIFICATION_FAILED
+                },
+                explanationAr = json.optString("explanationAr", "").ifBlank {
+                    if (finalVerified) "تم فحص الشاشة وتأكيد النتيجة." else "فشل التحقق على الشاشة."
+                },
+                suggestedFixAr = json.optString("suggestedFixAr", ""),
+                sensitiveUiDetected = sensitive
+            )
+        } catch (_: Exception) {
+            ScreenVerificationResult(
+                verified = false,
+                status = StepVerificationStatus.VERIFICATION_FAILED,
+                explanationAr = "فشل التحقق: تعذر تحليل استجابة JSON.",
+                suggestedFixAr = "تحقق من الشاشة بنفسك ثم أعد المحاولة."
             )
         }
     }
@@ -989,31 +1062,33 @@ class GeminiRepository internal constructor(
         }
 
         val chain = getModelChainForTier(ModelRouteTier.FLASH)
-        var result = withModelChainResilience(
-            timeoutMs = 30_000L,
-            candidates = listOf(
-                ModelCallCandidate(chain[0]) { modelClient.generateGeneralArabicText(prompt) },
-                ModelCallCandidate(chain[1]) { modelClient.generateLiteGeneralArabicText(prompt) },
-                ModelCallCandidate(chain[2]) { modelClient.generateGeneralArabicTextThird(prompt) }
-            )
-        )
-        var parsed = tryParseMiniChatDirectiveJson(result.value)
-        if (parsed == null) {
-            val strictJsonPrompt = buildString {
-                appendLine("أعد الإجابة بصيغة JSON فقط بدون أي كلمة أو علامة خارج كائن { ... }:")
-                appendLine(prompt)
-            }
-            result = withModelChainResilience(
-                timeoutMs = 25_000L,
+        val (result, finalDirective) = withTimeout(totalChainTimeoutMs) {
+            var res = withModelChainResilience(
+                timeoutMs = totalChainTimeoutMs,
                 candidates = listOf(
-                    ModelCallCandidate(chain[0]) { modelClient.generateGeneralArabicText(strictJsonPrompt) },
-                    ModelCallCandidate(chain[1]) { modelClient.generateLiteGeneralArabicText(strictJsonPrompt) },
-                    ModelCallCandidate(chain[2]) { modelClient.generateGeneralArabicTextThird(strictJsonPrompt) }
+                    ModelCallCandidate(chain[0]) { modelClient.generateGeneralArabicText(prompt) },
+                    ModelCallCandidate(chain[1]) { modelClient.generateLiteGeneralArabicText(prompt) },
+                    ModelCallCandidate(chain[2]) { modelClient.generateGeneralArabicTextThird(prompt) }
                 )
             )
-            parsed = tryParseMiniChatDirectiveJson(result.value)
+            var parsed = tryParseMiniChatDirectiveJson(res.value)
+            if (parsed == null) {
+                val strictJsonPrompt = buildString {
+                    appendLine("أعد الإجابة بصيغة JSON فقط بدون أي كلمة أو علامة خارج كائن { ... }:")
+                    appendLine(prompt)
+                }
+                res = withModelChainResilience(
+                    timeoutMs = totalChainTimeoutMs,
+                    candidates = listOf(
+                        ModelCallCandidate(chain[0]) { modelClient.generateGeneralArabicText(strictJsonPrompt) },
+                        ModelCallCandidate(chain[1]) { modelClient.generateLiteGeneralArabicText(strictJsonPrompt) },
+                        ModelCallCandidate(chain[2]) { modelClient.generateGeneralArabicTextThird(strictJsonPrompt) }
+                    )
+                )
+                parsed = tryParseMiniChatDirectiveJson(res.value)
+            }
+            res to (parsed ?: nonJsonFallbackDirective())
         }
-        val finalDirective = parsed ?: nonJsonFallbackDirective()
         return ModelResponseMetadata(
             value = finalDirective,
             tier = ModelRouteTier.FLASH,
@@ -1106,7 +1181,7 @@ class GeminiRepository internal constructor(
         return true to detail
     }
 
-    private fun parsePlanJson(originalCommand: String, json: JSONObject): AgentPlan {
+    internal fun parsePlanJson(originalCommand: String, json: JSONObject): AgentPlan {
         val summary = json.optString("understandingSummaryAr", "تحليل الأمر وتجهيز خطوات التنفيذ")
         val spoken = json.optString("spokenReplyAr", "تم تجهيز الخطة، يمكنك مراجعتها والبدء بالتنفيذ.")
         val stepsArray = json.optJSONArray("steps")

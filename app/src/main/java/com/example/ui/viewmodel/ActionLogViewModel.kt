@@ -8,11 +8,12 @@ import com.example.data.local.ActionLogRepository
 import com.example.data.local.ActionStatus
 import com.example.executor.CommandExecutor
 import com.example.organizer.AppOrganizer
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -20,9 +21,12 @@ import org.json.JSONObject
 data class ActionLogUiState(
     val logs: List<ActionLogEntity> = emptyList(),
     val selectedFilter: ActionStatus? = null,
-    val feedbackMessage: String? = null
+    val feedbackMessage: String? = null,
+    val hasMoreLogs: Boolean = false,
+    val totalCount: Int = 0
 )
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class ActionLogViewModel(
     private val actionLogRepository: ActionLogRepository,
     private val appOrganizer: AppOrganizer,
@@ -31,12 +35,14 @@ class ActionLogViewModel(
 
     private val selectedFilter = MutableStateFlow<ActionStatus?>(null)
     private val feedbackMessage = MutableStateFlow<String?>(null)
+    private val pageLimit = MutableStateFlow(ActionLogRepository.DEFAULT_PAGE_SIZE)
 
     val uiState: StateFlow<ActionLogUiState> = combine(
-        actionLogRepository.allLogs,
+        pageLimit.flatMapLatest { limit -> actionLogRepository.observePagedLogs(limit) },
+        actionLogRepository.observeLogsCount(),
         selectedFilter,
         feedbackMessage
-    ) { logs, filter, feedback ->
+    ) { logs, totalCount, filter, feedback ->
         val filtered = if (filter == null) {
             logs
         } else {
@@ -45,7 +51,9 @@ class ActionLogViewModel(
         ActionLogUiState(
             logs = filtered,
             selectedFilter = filter,
-            feedbackMessage = feedback
+            feedbackMessage = feedback,
+            hasMoreLogs = totalCount > logs.size,
+            totalCount = totalCount
         )
     }.stateIn(
         scope = viewModelScope,
@@ -55,6 +63,10 @@ class ActionLogViewModel(
 
     fun setFilter(filter: ActionStatus?) {
         selectedFilter.value = filter
+    }
+
+    fun loadMoreLogs() {
+        pageLimit.value += ActionLogRepository.DEFAULT_PAGE_SIZE
     }
 
     fun undoAction(log: ActionLogEntity) {

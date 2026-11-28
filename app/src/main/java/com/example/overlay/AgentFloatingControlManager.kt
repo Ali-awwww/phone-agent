@@ -111,6 +111,7 @@ interface FloatingControlCallbacks {
     fun onResumeAgent() {}
     fun onMiniChatSubmit(command: String) {}
     fun onMiniChatMicClick() {}
+    fun onApproveSensitiveAction(approved: Boolean) {}
 }
 
 enum class FloatingOverlayMode {
@@ -164,6 +165,11 @@ class AgentFloatingControlManager(private val context: Context) {
     private var miniInputEditText: EditText? = null
     private var miniMicBtn: ImageButton? = null
     private var miniSendBtn: ImageButton? = null
+
+    // بطاقة الموافقة العائمة على الإجراءات الحساسة فوق التطبيقات الخارجية
+    private var approvalContainer: LinearLayout? = null
+    private var approvalDetailTextView: TextView? = null
+    private var previousModeBeforeApproval: FloatingOverlayMode? = null
 
     private var layoutParams: WindowManager.LayoutParams? = null
     private var activeCallbacks: FloatingControlCallbacks? = null
@@ -239,9 +245,15 @@ class AgentFloatingControlManager(private val context: Context) {
                 miniChat.visibility = View.GONE
                 miniChatContainer = miniChat
 
+                // 4) بطاقة الموافقة العائمة للإجراءات الحساسة
+                val approvalCard = buildApprovalPromptCard(pillWidthPx, callbacks)
+                approvalCard.visibility = View.GONE
+                approvalContainer = approvalCard
+
                 root.addView(pill)
                 root.addView(bubble)
                 root.addView(miniChat)
+                root.addView(approvalCard)
 
                 val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -656,6 +668,92 @@ class AgentFloatingControlManager(private val context: Context) {
         }
     }
 
+    private fun buildApprovalPromptCard(
+        widthPx: Int,
+        callbacks: FloatingControlCallbacks
+    ): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            layoutParams = LinearLayout.LayoutParams(widthPx, LinearLayout.LayoutParams.WRAP_CONTENT)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = GradientDrawable().apply {
+                setColor(Color.argb(235, 22, 24, 32))
+                cornerRadius = dp(20).toFloat()
+                setStroke(dp(1), Color.parseColor("#FFB300"))
+            }
+
+            val headerTv = TextView(context).apply {
+                text = "موافقة مطلوبة قبل التنفيذ"
+                setTextColor(Color.parseColor("#FFD54F"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+            }
+            addView(headerTv)
+
+            val detailTv = TextView(context).apply {
+                text = ""
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                maxLines = 4
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, dp(6), 0, dp(10))
+            }
+            approvalDetailTextView = detailTv
+            addView(detailTv)
+
+            val actionsRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutDirection = View.LAYOUT_DIRECTION_RTL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+
+            val approveBtn = TextView(context).apply {
+                text = "موافق، نفّذ"
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#007AFF"))
+                    cornerRadius = dp(12).toFloat()
+                }
+                setOnClickListener {
+                    callbacks.onApproveSensitiveAction(true)
+                }
+            }
+
+            val rejectBtn = TextView(context).apply {
+                text = "إلغاء"
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#FF3B30"))
+                    cornerRadius = dp(12).toFloat()
+                }
+                setOnClickListener {
+                    callbacks.onApproveSensitiveAction(false)
+                }
+            }
+
+            actionsRow.addView(
+                approveBtn,
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginEnd = dp(8)
+                }
+            )
+            actionsRow.addView(
+                rejectBtn,
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            addView(actionsRow)
+        }
+    }
+
     fun isMiniChatOpen(): Boolean = currentMode == FloatingOverlayMode.MINI_CHAT
 
     suspend fun showMiniChat() {
@@ -744,6 +842,49 @@ class AgentFloatingControlManager(private val context: Context) {
         }
     }
 
+    suspend fun showApprovalPrompt(titleAr: String, detailsAr: String) {
+        withContext(Dispatchers.Main) {
+            if (rootView == null) return@withContext
+            if (previousModeBeforeApproval == null) {
+                previousModeBeforeApproval = currentMode
+            }
+            approvalDetailTextView?.text = buildString {
+                append(titleAr.trim())
+                if (detailsAr.isNotBlank()) {
+                    append("\n")
+                    append(detailsAr.trim())
+                }
+            }
+            pillContainer?.visibility = View.GONE
+            bubbleRow?.visibility = View.GONE
+            miniChatContainer?.visibility = View.GONE
+            approvalContainer?.visibility = View.VISIBLE
+            isHostVisible = true
+            rootView?.visibility = View.VISIBLE
+            val params = layoutParams
+            val wm = windowManager
+            val root = rootView
+            if (params != null && wm != null && root != null) {
+                miniInputEditText?.let { hideKeyboard(it) }
+                params.x = 0
+                params.y = getBottomNavClearancePx()
+                params.flags = baseNonFocusableFlags()
+                runCatching { wm.updateViewLayout(root, params) }
+            }
+        }
+    }
+
+    suspend fun hideApprovalPrompt() {
+        withContext(Dispatchers.Main) {
+            approvalContainer?.visibility = View.GONE
+            val restoreMode = previousModeBeforeApproval
+            previousModeBeforeApproval = null
+            if (restoreMode != null && rootView != null) {
+                switchModeInternal(restoreMode)
+            }
+        }
+    }
+
     suspend fun dismiss() {
         withContext(Dispatchers.Main) {
             mainHandler.removeCallbacks(dotAnimator)
@@ -773,6 +914,9 @@ class AgentFloatingControlManager(private val context: Context) {
                 miniInputEditText = null
                 miniMicBtn = null
                 miniSendBtn = null
+                approvalContainer = null
+                approvalDetailTextView = null
+                previousModeBeforeApproval = null
                 layoutParams = null
                 windowManager = null
                 activeCallbacks = null
@@ -820,6 +964,7 @@ class AgentFloatingControlManager(private val context: Context) {
 
     private fun switchModeInternal(target: FloatingOverlayMode) {
         currentMode = target
+        approvalContainer?.visibility = View.GONE
         pillContainer?.visibility = if (target == FloatingOverlayMode.PILL) View.VISIBLE else View.GONE
         bubbleRow?.visibility = if (target == FloatingOverlayMode.BUBBLE) View.VISIBLE else View.GONE
         miniChatContainer?.visibility = if (target == FloatingOverlayMode.MINI_CHAT) View.VISIBLE else View.GONE

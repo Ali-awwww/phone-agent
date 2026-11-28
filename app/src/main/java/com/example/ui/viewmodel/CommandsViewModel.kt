@@ -22,6 +22,8 @@ import com.example.executor.ChatIntentRouter
 import com.example.executor.ChatRouteIntent
 import com.example.executor.CommandExecutor
 import com.example.executor.ReminderReceiver
+import com.example.executor.TaskCancelResolution
+import com.example.executor.TaskCancellationResolver
 import com.example.files.FileCleanupBatch
 import com.example.files.FileScanReport
 import com.example.files.PhoneFileManager
@@ -30,6 +32,7 @@ import com.example.files.formatFileSize
 import com.example.game.GeneralGameEngine
 import com.example.model.AgentPlan
 import com.example.model.AgentPlanStep
+import com.example.model.StepActionType
 import com.example.model.StepStatus
 import com.example.model.StepVerificationStatus
 import com.example.organizer.AppOrganizer
@@ -39,12 +42,16 @@ import com.example.overlay.AgentFloatingControlManager
 import com.example.overlay.FloatingControlCallbacks
 import com.example.policy.AgentPolicy
 import com.example.policy.AgentPromptRules
+import com.example.policy.SensitiveActionGate
+import com.example.policy.SensitiveActionRequest
+import com.example.policy.SensitiveActionSource
 import com.example.service.ScreenStateBridge
 import com.example.verifier.ScreenVerifier
 import com.example.voice.VoiceAssistantManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -75,8 +82,11 @@ import com.example.security.classifyModelError
 import com.example.security.getActiveProjectId
 import com.example.security.getEffectiveDebugSecret
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -127,7 +137,9 @@ data class CommandsScreenState(
     val uiState: CommandsUiState = CommandsUiState.Idle,
     val pendingApprovalStep: AgentPlanStep? = null,
     val pendingApprovalPlan: AgentPlan? = null,
+    val pendingApprovalNextStep: AgentPlanStep? = null,
     val pendingApprovalLogId: Long? = null,
+    val pendingTaskCancelConfirmation: AgentTaskEntity? = null,
     val isExecuting: Boolean = false,
     val isBusyWorking: Boolean = false,
     val isGameplayRunning: Boolean = false,
@@ -150,7 +162,12 @@ data class CommandsScreenState(
     val pendingFileBatches: List<FileCleanupBatch> = emptyList(),
     val currentFileBatchIndex: Int = 0,
     val showTrashDialog: Boolean = false,
-    val trashItems: List<TrashItemRecord> = emptyList()
+    val trashItems: List<TrashItemRecord> = emptyList(),
+    val liveDoingNowAr: String = "",
+    val liveNextStepAr: String = "",
+    val liveWaitingForUserAr: String = "",
+    val geminiElapsedSeconds: Int = 0,
+    val geminiTimeoutSeconds: Int = (com.example.data.ai.TOTAL_GEMINI_COMMAND_TIMEOUT_MS / 1000L).toInt()
 ) {
     val isAnyTaskRunning: Boolean
         get() = isBusyWorking || uiState is CommandsUiState.Planning || isExecuting || isGameplayRunning
@@ -159,6 +176,7 @@ data class CommandsScreenState(
         get() = pendingFileBatches.getOrNull(currentFileBatchIndex)
 }
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class CommandsViewModel(
     private val geminiRepository: GeminiRepository,
     private val commandExecutor: CommandExecutor,
@@ -172,6 +190,7 @@ class CommandsViewModel(
     private val floatingControlManager: AgentFloatingControlManager,
     private val appContext: Context,
     private val agentPolicy: AgentPolicy = AgentPolicy(),
+    private val sensitiveActionGate: SensitiveActionGate = SensitiveActionGate(agentPolicy),
     private val phoneFileManager: PhoneFileManager = PhoneFileManager(
         context = appContext,
         actionLogRepository = actionLogRepository,
@@ -184,8 +203,21 @@ class CommandsViewModel(
 
     val isAccessibilityConnected: StateFlow<Boolean> = ScreenStateBridge.isServiceConnected
 
-    val messages: StateFlow<List<ChatMessageEntity>> = chatHistoryRepository.messagesFlow
+    private val chatPageLimit = MutableStateFlow(ChatHistoryRepository.DEFAULT_CHAT_PAGE_SIZE)
+
+    val messages: StateFlow<List<ChatMessageEntity>> = chatPageLimit
+        .flatMapLatest { limit -> chatHistoryRepository.observeRecentMessages(limit) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+
+    val hasOlderMessages: StateFlow<Boolean> = combine(
+        chatHistoryRepository.messagesCountFlow,
+        chatPageLimit
+    ) { count, limit -> count > limit }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), false)
+
+    fun loadOlderMessages() {
+        chatPageLimit.value += ChatHistoryRepository.DEFAULT_CHAT_PAGE_SIZE
+    }
 
     val activeTasks: StateFlow<List<AgentTaskEntity>> = chatHistoryRepository.activeTasksFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
@@ -196,6 +228,7 @@ class CommandsViewModel(
     private var activeTaskJob: Job? = null
     private var executionJob: Job? = null
     private var gameLoopJob: Job? = null
+    private var geminiTimerJob: Job? = null
     private var approvalDeferred: CompletableDeferred<Boolean>? = null
     private var cachedInstalledApps: List<InstalledAppInfo> = emptyList()
     private var lastSubmittedCommand: String? = null
@@ -204,7 +237,41 @@ class CommandsViewModel(
     private var fileBatchRunMovedCount: Int = 0
     private var fileBatchRunSkippedCount: Int = 0
     private var fileBatchRunFreedBytes: Long = 0L
+    private val fileBatchSucceededList = mutableListOf<String>()
+    private val fileBatchUnverifiedList = mutableListOf<String>()
+    private val fileBatchFailedList = mutableListOf<String>()
     private val conversationTurns = mutableListOf<ChatTurn>()
+
+    private fun startGeminiProgressTimer(
+        doingNowAr: String,
+        nextStepAr: String,
+        waitingAr: String
+    ) {
+        geminiTimerJob?.cancel()
+        val timeoutSec = _state.value.geminiTimeoutSeconds
+        _state.update {
+            it.copy(
+                liveDoingNowAr = doingNowAr,
+                liveNextStepAr = nextStepAr,
+                liveWaitingForUserAr = waitingAr,
+                geminiElapsedSeconds = 1
+            )
+        }
+        geminiTimerJob = viewModelScope.launch {
+            var sec = 1
+            while (isActive && sec < timeoutSec) {
+                delay(1_000L)
+                sec++
+                _state.update { it.copy(geminiElapsedSeconds = sec) }
+            }
+        }
+    }
+
+    private fun stopGeminiProgressTimer() {
+        geminiTimerJob?.cancel()
+        geminiTimerJob = null
+        _state.update { it.copy(geminiElapsedSeconds = 0) }
+    }
 
     private fun recordConversationTurn(userMessage: String, agentReply: String) {
         val cleanUser = userMessage.trim()
@@ -248,6 +315,9 @@ class CommandsViewModel(
         registerPackageChangeReceiver()
         observeExecutionPauseState()
         observeActiveTaskBridge()
+        sensitiveActionGate.setApprovalHandler { request ->
+            requestUserApprovalViaUi(request)
+        }
         if (BuildConfig.DEBUG) {
             checkModelConnection(isInitialSelfCheck = true)
         }
@@ -566,6 +636,11 @@ class CommandsViewModel(
                 )
             }
             try {
+                startGeminiProgressTimer(
+                    doingNowAr = "أحلّل التسجيل الصوتي وأحوّله إلى خطة واضحة...",
+                    nextStepAr = "عرض نص الأمر وخطة التنفيذ لمراجعتك",
+                    waitingAr = "انتظار استجابة النموذج (يمكنك الإيقاف في أي لحظة)"
+                )
                 val installed = ensureInstalledAppsLoaded()
                 val appLabels = installed.map { it.label }
                 val audioMeta = geminiRepository.transcribeAndPlanAudioWithMeta(
@@ -573,9 +648,10 @@ class CommandsViewModel(
                     mimeType = mimeType,
                     installedAppNames = appLabels,
                     onStatusUpdate = { statusMsg ->
-                        _state.update { it.copy(statusNoticeAr = statusMsg) }
+                        _state.update { it.copy(statusNoticeAr = statusMsg, liveDoingNowAr = statusMsg) }
                     }
                 )
+                stopGeminiProgressTimer()
                 val (transcript, rawPlan) = audioMeta.value
                 recordModelRouteUsage(audioMeta, transcript)
                 if (transcript.isNotBlank()) {
@@ -651,22 +727,28 @@ class CommandsViewModel(
                 }
                 speakIfEnabled(groundedPlan.spokenReplyAr)
             } catch (e: TimeoutCancellationException) {
+                stopGeminiProgressTimer()
                 _state.update {
                     it.copy(
                         isBusyWorking = false,
                         statusNoticeAr = "",
+                        liveDoingNowAr = "",
+                        liveNextStepAr = "",
+                        liveWaitingForUserAr = "",
                         uiState = CommandsUiState.Idle,
                         activeError = CompactErrorState(
                             titleAr = "انتهت مهلة تحليل الصوت",
-                            summaryAr = "استغرق تحليل الصوت وقتاً أطول من المعتاد. اضغط إعادة المحاولة.",
+                            summaryAr = "استغرق تحليل الصوت وقتاً أطول من المهلة الإجمالية (${it.geminiTimeoutSeconds} ثانية). اضغط إعادة المحاولة.",
                             technicalDetails = e.message ?: "TimeoutCancellationException",
                             retryType = ErrorRetryType.VOICE
                         )
                     )
                 }
             } catch (e: CancellationException) {
+                stopGeminiProgressTimer()
                 throw e
             } catch (e: Exception) {
+                stopGeminiProgressTimer()
                 handleGeminiFailure("Audio planning", e, retryType = ErrorRetryType.VOICE)
             }
         }
@@ -775,6 +857,11 @@ class CommandsViewModel(
                                 statusNoticeAr = "أجهّز لك خطة التنفيذ خطوة بخطوة... ${AgentPromptRules.WAIT_THINKING_NOTICE_AR}"
                             )
                         }
+                        startGeminiProgressTimer(
+                            doingNowAr = "أفحص طلبك وأجهّز خطة العمل عبر Gemini...",
+                            nextStepAr = "عرض الخطوات المرقّمة ومراجعة أي إجراء حساس",
+                            waitingAr = "انتظار استجابة النموذج (يمكنك الإيقاف في أي لحظة)"
+                        )
                         val rawScreenSummary = ScreenStateBridge.getService()?.captureCurrentScreen()
                             ?.toCompactPromptText()
                             ?: "داخل تطبيق وكيل الهاتف (خدمة إمكانية الوصول غير مفعلة حالياً)"
@@ -784,9 +871,10 @@ class CommandsViewModel(
                             installedAppNames = appLabels,
                             currentScreenSummary = AgentPromptRules.enrichPlanScreenSummary(rawScreenSummary),
                             onStatusUpdate = { statusMsg ->
-                                _state.update { it.copy(statusNoticeAr = statusMsg) }
+                                _state.update { it.copy(statusNoticeAr = statusMsg, liveDoingNowAr = statusMsg) }
                             }
                         )
+                        stopGeminiProgressTimer()
                         recordModelRouteUsage(planMeta, command)
                         val rawPlan = planMeta.value
 
@@ -804,6 +892,9 @@ class CommandsViewModel(
                                 it.copy(
                                     isBusyWorking = false,
                                     statusNoticeAr = "",
+                                    liveDoingNowAr = "",
+                                    liveNextStepAr = "",
+                                    liveWaitingForUserAr = "",
                                     lastSpokenReply = planPolicy.reasonAr,
                                     uiState = CommandsUiState.Idle
                                 )
@@ -824,6 +915,9 @@ class CommandsViewModel(
                             it.copy(
                                 isBusyWorking = false,
                                 statusNoticeAr = "",
+                                liveDoingNowAr = "",
+                                liveNextStepAr = "",
+                                liveWaitingForUserAr = "",
                                 lastSpokenReply = groundedPlan.spokenReplyAr,
                                 uiState = CommandsUiState.PlanActive(groundedPlan)
                             )
@@ -833,18 +927,30 @@ class CommandsViewModel(
 
                     else -> {
                         handleNonPlanIntent(route, installed, command)
-                        _state.update { it.copy(isBusyWorking = false, statusNoticeAr = "") }
+                        _state.update {
+                            it.copy(
+                                isBusyWorking = false,
+                                statusNoticeAr = "",
+                                liveDoingNowAr = "",
+                                liveNextStepAr = "",
+                                liveWaitingForUserAr = ""
+                            )
+                        }
                     }
                 }
             } catch (e: TimeoutCancellationException) {
+                stopGeminiProgressTimer()
                 _state.update {
                     it.copy(
                         isBusyWorking = false,
                         statusNoticeAr = "",
+                        liveDoingNowAr = "",
+                        liveNextStepAr = "",
+                        liveWaitingForUserAr = "",
                         uiState = CommandsUiState.Idle,
                         activeError = CompactErrorState(
                             titleAr = "انتهت مهلة الاتصال",
-                            summaryAr = "استغرقت الاستجابة وقتاً طويلاً (60 ثانية). أعد المحاولة الآن.",
+                            summaryAr = "استغرقت الاستجابة وقتاً أطول من المهلة الإجمالية (${it.geminiTimeoutSeconds} ثانية). أعد المحاولة الآن.",
                             technicalDetails = e.message ?: "TimeoutCancellationException",
                             retryCommand = command,
                             retryType = ErrorRetryType.COMMAND
@@ -852,8 +958,10 @@ class CommandsViewModel(
                     )
                 }
             } catch (e: CancellationException) {
+                stopGeminiProgressTimer()
                 throw e
             } catch (e: Exception) {
+                stopGeminiProgressTimer()
                 handleGeminiFailure(
                     contextTag = "Chat command",
                     e = e,
@@ -979,7 +1087,12 @@ class CommandsViewModel(
         useScopedFallback: Boolean
     ) {
         _state.update {
-            it.copy(statusNoticeAr = "جارٍ فحص ملفات الهاتف واستبعاد Android/ ومجلدات النظام...")
+            it.copy(
+                statusNoticeAr = "جارٍ فحص ملفات الهاتف واستبعاد Android/ ومجلدات النظام...",
+                liveDoingNowAr = "أفحص تخزين الهاتف مع استبعاد مجلدات النظام والملفات الخاصة...",
+                liveNextStepAr = "تجهيز تقرير مفصّل بالملفات والمجلدات الفارغة",
+                liveWaitingForUserAr = "انتظار انتهاء الفحص"
+            )
         }
         val report = phoneFileManager.scanDeviceFiles(useScopedFallback = useScopedFallback)
         val (focusCategory, focusOnly) = phoneFileManager.detectRequestedFocus(queryText)
@@ -993,6 +1106,9 @@ class CommandsViewModel(
         fileBatchRunMovedCount = 0
         fileBatchRunSkippedCount = 0
         fileBatchRunFreedBytes = 0L
+        fileBatchSucceededList.clear()
+        fileBatchUnverifiedList.clear()
+        fileBatchFailedList.clear()
 
         recordConversationTurn(queryText, summaryText)
         chatHistoryRepository.addAgentMessage(summaryText, ChatMessageType.TEXT)
@@ -1002,12 +1118,16 @@ class CommandsViewModel(
         } else {
             "انتهى الفحص؛ عثرت على ${report.emptyFoldersCount} مجلد فارغ و${report.items.size} عنصر إجمالاً. راجع الدفعة الأولى للموافقة قبل نقل أي عنصر للسلة."
         }
+        val firstBatch = batches.firstOrNull()
         _state.update {
             it.copy(
                 uiState = CommandsUiState.Idle,
                 latestFileReport = report,
                 pendingFileBatches = batches,
                 currentFileBatchIndex = 0,
+                liveDoingNowAr = if (firstBatch != null) "اكتمل الفحص (${report.items.size} عنصر)" else "",
+                liveNextStepAr = firstBatch?.titleAr ?: "",
+                liveWaitingForUserAr = if (firstBatch != null) "موافقتك أو تخطّي الدفعة الأولى" else "",
                 lastSpokenReply = spokenSummary
             )
         }
@@ -1021,7 +1141,10 @@ class CommandsViewModel(
             _state.update {
                 it.copy(
                     isBusyWorking = true,
-                    statusNoticeAr = "جارٍ نقل ${batch.titleAr} إلى سلة المهملات (7 أيام)..."
+                    statusNoticeAr = "جارٍ نقل ${batch.titleAr} إلى سلة المهملات (7 أيام)...",
+                    liveDoingNowAr = "أنقل عناصر ${batch.titleAr} إلى سلة المهملات الآمنة...",
+                    liveNextStepAr = "تحديث حالة الدفعة وعرض الدفعة التالية",
+                    liveWaitingForUserAr = ""
                 )
             }
             try {
@@ -1030,6 +1153,23 @@ class CommandsViewModel(
                 fileBatchRunSkippedCount += outcome.skippedNonEmptyCount + outcome.skippedExcludedOrMissingCount
                 fileBatchRunFreedBytes += outcome.freedBytes
 
+                if (outcome.movedToTrashCount > 0) {
+                    fileBatchSucceededList.add(
+                        "${batch.titleAr}: نقل ${outcome.movedToTrashCount} عنصر للسلة (${formatFileSize(outcome.freedBytes)})"
+                    )
+                }
+                val skippedTotal = outcome.skippedNonEmptyCount + outcome.skippedExcludedOrMissingCount
+                if (skippedTotal > 0) {
+                    fileBatchUnverifiedList.add(
+                        "${batch.titleAr}: تم تخطي $skippedTotal عنصر (غير فارغ أو محمي أو مفقود)"
+                    )
+                }
+                if (outcome.failedCount > 0) {
+                    fileBatchFailedList.add(
+                        "${batch.titleAr}: تعذّر نقل ${outcome.failedCount} عنصر"
+                    )
+                }
+
                 val batchMsg = buildString {
                     append("تم تنفيذ ${batch.titleAr}: نُقل ${outcome.movedToTrashCount} عنصر إلى سلة المهملات (تُحفظ 7 أيام)")
                     if (outcome.freedBytes > 0L) {
@@ -1037,6 +1177,9 @@ class CommandsViewModel(
                     }
                     if (outcome.skippedNonEmptyCount > 0) {
                         append("، وتُخطّي ${outcome.skippedNonEmptyCount} مجلد لأنها لم تعد فارغة لحظة الحذف")
+                    }
+                    if (outcome.failedCount > 0) {
+                        append("، وتعذّر نقل ${outcome.failedCount} عنصر")
                     }
                     append(".")
                 }
@@ -1052,6 +1195,7 @@ class CommandsViewModel(
         val currentState = _state.value
         val batch = currentState.currentPendingFileBatch ?: return
         viewModelScope.launch {
+            fileBatchFailedList.add("${batch.titleAr}: أُلغيت بناءً على طلبك")
             actionLogRepository.logAction(
                 title = "إلغاء دفعة تنظيف ملفات",
                 details = "${batch.titleAr} (${batch.items.size} عناصر)",
@@ -1072,16 +1216,40 @@ class CommandsViewModel(
     ) {
         val nextIndex = completedIndex + 1
         if (nextIndex < batches.size) {
-            _state.update { it.copy(currentFileBatchIndex = nextIndex) }
+            val nextBatch = batches[nextIndex]
+            _state.update {
+                it.copy(
+                    currentFileBatchIndex = nextIndex,
+                    liveDoingNowAr = "بانتظار مراجعتك لدفعة تنظيف الملفات",
+                    liveNextStepAr = nextBatch.titleAr,
+                    liveWaitingForUserAr = "موافقتك أو تخطّي الدفعة"
+                )
+            }
         } else {
             val activeTrash = phoneFileManager.listTrashItems()
             val finalMsg = "اكتملت مراجعة الدفعات: نُقل $fileBatchRunMovedCount عنصر إلى سلة المهملات (المساحة المحررة المؤقتة: ${formatFileSize(fileBatchRunFreedBytes)}، المتخطى: $fileBatchRunSkippedCount). يمكنك قول «سلة المهملات» في أي وقت للاستعادة خلال 7 أيام."
             chatHistoryRepository.addAgentMessage(finalMsg, ChatMessageType.TEXT)
+            val truthReport = buildTruthReport(
+                succeeded = fileBatchSucceededList,
+                unverified = fileBatchUnverifiedList,
+                failed = fileBatchFailedList,
+                rolledBack = emptyList()
+            )
+            if (!truthReport.isNullOrBlank()) {
+                chatHistoryRepository.addAgentMessage(truthReport, ChatMessageType.TEXT)
+                recordConversationTurn("تقرير تنظيف الملفات", truthReport)
+            } else {
+                recordConversationTurn("تنظيف الملفات", finalMsg)
+            }
             _state.update {
                 it.copy(
                     pendingFileBatches = emptyList(),
                     currentFileBatchIndex = 0,
                     trashItems = activeTrash,
+                    liveDoingNowAr = "",
+                    liveNextStepAr = "",
+                    liveWaitingForUserAr = "",
+                    executionTruthReportAr = truthReport,
                     lastSpokenReply = finalMsg
                 )
             }
@@ -1131,6 +1299,7 @@ class CommandsViewModel(
                 val status = ActionStatus.fromName(log.status)
                 val badge = when (status) {
                     ActionStatus.SUCCESS -> "✅"
+                    ActionStatus.UNVERIFIED -> "⚠️"
                     ActionStatus.PENDING_APPROVAL -> "⏳"
                     ActionStatus.CANCELLED -> "⏹"
                     ActionStatus.FAILED -> "❌"
@@ -1265,12 +1434,17 @@ class CommandsViewModel(
         }.trim()
 
         val groundedReply = try {
+            startGeminiProgressTimer(
+                doingNowAr = "أحلّل عناصر شاشة «$appLabel» وألخّصها...",
+                nextStepAr = "عرض ملخص العناصر الفعلية في الدردشة",
+                waitingAr = "انتظار استجابة النموذج"
+            )
             val explainMeta = geminiRepository.summarizeAppScreensWithMeta(
                 appName = appLabel,
                 packageName = snapshot.packageName,
                 capturedScreenTexts = AgentPromptRules.enrichScreenReadLines(snapshot.toCompactPromptText()),
                 onStatusUpdate = { statusMsg ->
-                    _state.update { it.copy(statusNoticeAr = statusMsg) }
+                    _state.update { it.copy(statusNoticeAr = statusMsg, liveDoingNowAr = statusMsg) }
                 }
             )
             recordModelRouteUsage(explainMeta, "قراءة شاشة $appLabel")
@@ -1281,11 +1455,21 @@ class CommandsViewModel(
             Log.w(TAG, "Screen explanation fell back to factual elements", e)
             val reason = classifyModelError(e).category.titleAr
             "تعذر التلخيص الذكي عبر Gemini ($reason)، وهذه العناصر الفعلية المرصودة في شاشتك الآن:\n$factualElements"
+        } finally {
+            stopGeminiProgressTimer()
         }
 
         recordConversationTurn(userCommand, groundedReply)
         chatHistoryRepository.addAgentMessage(groundedReply, ChatMessageType.SCREEN_READ)
-        _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = groundedReply) }
+        _state.update {
+            it.copy(
+                uiState = CommandsUiState.Idle,
+                liveDoingNowAr = "",
+                liveNextStepAr = "",
+                liveWaitingForUserAr = "",
+                lastSpokenReply = groundedReply
+            )
+        }
         speakIfEnabled(groundedReply)
     }
 
@@ -1377,59 +1561,92 @@ class CommandsViewModel(
 
     private suspend fun handleCancelTaskByQuery(queryText: String, userCommand: String) {
         val active = chatHistoryRepository.getActiveTasks()
-        if (active.isEmpty()) {
-            val reply = "لا توجد تذكيرات أو مهام نشطة لإلغائها حالياً."
-            recordConversationTurn(userCommand, reply)
-            chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
-            _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
-            speakIfEnabled(reply)
-            return
-        }
-
-        val normQuery = ChatIntentRouter.normalizeDigitsAndArabic(queryText).lowercase()
-        val matched = if (normQuery.isBlank()) {
-            active.last()
-        } else {
-            active.firstOrNull {
-                ChatIntentRouter.normalizeDigitsAndArabic(it.title).lowercase().contains(normQuery)
+        when (val resolution = TaskCancellationResolver.resolve(queryText, active)) {
+            TaskCancelResolution.NoActiveTasks -> {
+                val reply = "لا توجد تذكيرات أو مهام نشطة لإلغائها حالياً."
+                recordConversationTurn(userCommand, reply)
+                chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
+                _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
+                speakIfEnabled(reply)
+            }
+            is TaskCancelResolution.NeedsClarification -> {
+                recordConversationTurn(userCommand, resolution.reasonAr)
+                chatHistoryRepository.addAgentMessage(
+                    text = resolution.reasonAr,
+                    type = ChatMessageType.TASKS_LIST,
+                    payloadJson = encodeTasksJson(resolution.candidateTasks)
+                )
+                _state.update {
+                    it.copy(
+                        uiState = CommandsUiState.Idle,
+                        lastSpokenReply = resolution.reasonAr
+                    )
+                }
+                speakIfEnabled(resolution.reasonAr)
+            }
+            is TaskCancelResolution.NeedsConfirmation -> {
+                val target = resolution.targetTask
+                val reply = "هل تريد بالتأكيد إلغاء «${target.title}»؟ أكّد الإلغاء من الحوار أو البطاقة."
+                recordConversationTurn(userCommand, reply)
+                chatHistoryRepository.addAgentMessage(
+                    text = reply,
+                    type = ChatMessageType.TASKS_LIST,
+                    payloadJson = encodeTasksJson(listOf(target))
+                )
+                _state.update {
+                    it.copy(
+                        uiState = CommandsUiState.Idle,
+                        pendingTaskCancelConfirmation = target,
+                        lastSpokenReply = reply
+                    )
+                }
+                speakIfEnabled(reply)
             }
         }
+    }
 
-        if (matched == null) {
-            val reply = "لست متأكداً أي تذكير تقصد إلغاءه بـ «$queryText». هذه قائمتك الحالية لتختار منه بوضوح:"
-            recordConversationTurn(userCommand, reply)
+    fun confirmTaskCancellation() {
+        val task = _state.value.pendingTaskCancelConfirmation ?: return
+        _state.update { it.copy(pendingTaskCancelConfirmation = null) }
+        viewModelScope.launch {
+            val alarmStopped = task.alarmRequestCode?.let { code ->
+                commandExecutor.cancelScheduledReminder(code)
+            }
+            chatHistoryRepository.cancelTask(task.id)
+            val alarmNote = when (alarmStopped) {
+                true -> " وإيقاف المنبه المجدول فعلياً"
+                false -> " (لم يُعثر على منبه نظام نشط لإيقافه)"
+                null -> ""
+            }
+            val reply = "تم إلغاء «${task.title}»$alarmNote."
+            recordConversationTurn("تأكيد إلغاء ${task.title}", reply)
+            actionLogRepository.logAction(
+                title = "إلغاء ${AgentTaskType.entries.firstOrNull { it.name == task.taskType }?.titleAr ?: "مهمة"}",
+                details = reply,
+                status = if (alarmStopped == false) ActionStatus.UNVERIFIED else ActionStatus.UNDONE,
+                actionType = "CHAT_CANCEL_TASK"
+            )
+            val remaining = chatHistoryRepository.getActiveTasks()
             chatHistoryRepository.addAgentMessage(
                 text = reply,
-                type = ChatMessageType.TASKS_LIST,
-                payloadJson = encodeTasksJson(active)
+                type = if (remaining.isNotEmpty()) ChatMessageType.TASKS_LIST else ChatMessageType.TEXT,
+                payloadJson = if (remaining.isNotEmpty()) encodeTasksJson(remaining) else null
             )
-            _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
+            _state.update { it.copy(lastSpokenReply = reply) }
             speakIfEnabled(reply)
-            return
         }
+    }
 
-        matched.alarmRequestCode?.let { code ->
-            commandExecutor.cancelScheduledReminder(code)
+    fun dismissTaskCancellationConfirmation() {
+        val task = _state.value.pendingTaskCancelConfirmation
+        _state.update { it.copy(pendingTaskCancelConfirmation = null) }
+        if (task != null) {
+            viewModelScope.launch {
+                val reply = "تم الإبقاء على «${task.title}» دون إلغاء."
+                chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
+                _state.update { it.copy(lastSpokenReply = reply) }
+            }
         }
-        chatHistoryRepository.cancelTask(matched.id)
-
-        val reply = "تم إلغاء «${matched.title}»${if (matched.alarmRequestCode != null) " وإيقاف المنبه المجدول له" else ""}."
-        recordConversationTurn(userCommand, reply)
-        actionLogRepository.logAction(
-            title = "إلغاء ${AgentTaskType.entries.firstOrNull { it.name == matched.taskType }?.titleAr ?: "مهمة"}",
-            details = reply,
-            status = ActionStatus.UNDONE,
-            actionType = "CHAT_CANCEL_TASK"
-        )
-
-        val remaining = chatHistoryRepository.getActiveTasks()
-        chatHistoryRepository.addAgentMessage(
-            text = reply,
-            type = if (remaining.isNotEmpty()) ChatMessageType.TASKS_LIST else ChatMessageType.TEXT,
-            payloadJson = if (remaining.isNotEmpty()) encodeTasksJson(remaining) else null
-        )
-        _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
-        speakIfEnabled(reply)
     }
 
     private suspend fun handleConversationalChat(userMessage: String, retryCommand: String = userMessage) {
@@ -1463,25 +1680,41 @@ class CommandsViewModel(
             )
         }
         try {
+            startGeminiProgressTimer(
+                doingNowAr = "أصيغ الرد المناسب لسؤالك...",
+                nextStepAr = "عرض الرد في المحادثة",
+                waitingAr = "انتظار استجابة النموذج (يمكنك الإيقاف في أي لحظة)"
+            )
             val modelTier = ChatIntentRouter.classifyModelTier(userMessage, appLabels)
             val meta = geminiRepository.conversationalReplyWithMeta(
                 userMessage = userMessage,
                 contextSummary = AgentPromptRules.enrichChatContextSummary(baseContext),
                 history = historyText,
                 onStatusUpdate = { statusMsg ->
-                    _state.update { it.copy(statusNoticeAr = statusMsg) }
+                    _state.update { it.copy(statusNoticeAr = statusMsg, liveDoingNowAr = statusMsg) }
                 },
                 modelTier = modelTier
             )
+            stopGeminiProgressTimer()
             recordModelRouteUsage(meta, userMessage)
             recordConversationTurn(userMessage, meta.value)
 
             chatHistoryRepository.addAgentMessage(meta.value, ChatMessageType.TEXT)
-            _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = meta.value) }
+            _state.update {
+                it.copy(
+                    uiState = CommandsUiState.Idle,
+                    liveDoingNowAr = "",
+                    liveNextStepAr = "",
+                    liveWaitingForUserAr = "",
+                    lastSpokenReply = meta.value
+                )
+            }
             speakIfEnabled(meta.value)
         } catch (e: CancellationException) {
+            stopGeminiProgressTimer()
             throw e
         } catch (e: Exception) {
+            stopGeminiProgressTimer()
             handleGeminiFailure(
                 contextTag = "Conversational chat",
                 e = e,
@@ -1491,7 +1724,7 @@ class CommandsViewModel(
         }
     }
 
-    private suspend fun recordModelRouteUsage(
+    private fun recordModelRouteUsage(
         meta: ModelResponseMetadata<*>,
         requestPreview: String
     ) {
@@ -1499,15 +1732,9 @@ class CommandsViewModel(
         val traceText = "آخر استجابة: ${meta.modelUsed} • ${meta.tier.labelAr}$fallbackNote"
         Log.i(
             TAG,
-            "ModelTrace: tier=${meta.tier.name}, intended=${meta.intendedModel}, actual=${meta.modelUsed}, fallback=${meta.usedFallback}"
+            "ModelTrace: tier=${meta.tier.name}, intended=${meta.intendedModel}, actual=${meta.modelUsed}, fallback=${meta.usedFallback}, preview=${requestPreview.take(40)}"
         )
         _state.update { it.copy(lastModelTraceAr = traceText) }
-        actionLogRepository.logAction(
-            title = "تبديل النموذج: ${meta.modelUsed}",
-            details = "${meta.tier.labelAr}$fallbackNote | الطلب: ${requestPreview.take(60)}",
-            status = ActionStatus.SUCCESS,
-            actionType = "MODEL_ROUTE_${meta.tier.name}"
-        )
     }
 
     fun openPlayFeatureDialog() {
@@ -1553,6 +1780,9 @@ class CommandsViewModel(
                     isPaused = false,
                     isHandedOver = false,
                     statusNoticeAr = "يتولّى الوكيل اللعب الآن... ${AgentPromptRules.WAIT_THINKING_NOTICE_AR}",
+                    liveDoingNowAr = "أراقب شاشة اللعب وأحلّل الخطوة التالية...",
+                    liveNextStepAr = "تحديد الحركة المناسبة على الشاشة",
+                    liveWaitingForUserAr = "يمكنك الإيقاف أو تولّي اللعب بنفسك في أي لحظة",
                     uiState = CommandsUiState.Idle
                 )
             }
@@ -1567,14 +1797,37 @@ class CommandsViewModel(
                     goalAr = goalText,
                     maxCycles = 10,
                     onCycleUpdate = { updateMsg ->
-                        _state.update { it.copy(statusNoticeAr = updateMsg) }
+                        _state.update {
+                            it.copy(
+                                statusNoticeAr = updateMsg,
+                                liveDoingNowAr = updateMsg
+                            )
+                        }
                         chatHistoryRepository.addAgentMessage(updateMsg, ChatMessageType.GAME_STATUS)
                     },
                     callbacks = buildFloatingControlCallbacks()
                 )
-                recordConversationTurn(goalText, result.summaryAr)
+                val truthReport = buildTruthReport(
+                    succeeded = if (result.stepsExecuted > 0) {
+                        listOf("تم تنفيذ ${result.stepsExecuted} خطوة لعب: ${result.summaryAr}")
+                    } else emptyList(),
+                    unverified = if (result.stepsExecuted == 0 && !result.completedNaturally) {
+                        listOf(result.summaryAr)
+                    } else emptyList(),
+                    failed = emptyList(),
+                    rolledBack = emptyList()
+                )
+                recordConversationTurn(goalText, truthReport ?: result.summaryAr)
                 chatHistoryRepository.addAgentMessage(result.summaryAr, ChatMessageType.GAME_STATUS)
-                _state.update { it.copy(lastSpokenReply = result.summaryAr) }
+                if (!truthReport.isNullOrBlank()) {
+                    chatHistoryRepository.addAgentMessage(truthReport, ChatMessageType.TEXT)
+                }
+                _state.update {
+                    it.copy(
+                        lastSpokenReply = result.summaryAr,
+                        executionTruthReportAr = truthReport
+                    )
+                }
                 speakIfEnabled(result.summaryAr)
             } catch (e: CancellationException) {
                 throw e
@@ -1591,7 +1844,10 @@ class CommandsViewModel(
                         isGameplayRunning = false,
                         isPaused = false,
                         isHandedOver = false,
-                        statusNoticeAr = ""
+                        statusNoticeAr = "",
+                        liveDoingNowAr = "",
+                        liveNextStepAr = "",
+                        liveWaitingForUserAr = ""
                     )
                 }
             }
@@ -1640,13 +1896,18 @@ class CommandsViewModel(
     fun cancelTaskById(taskId: Long) {
         viewModelScope.launch {
             val task = chatHistoryRepository.getTaskById(taskId)
-            task?.alarmRequestCode?.let { commandExecutor.cancelScheduledReminder(it) }
+            val alarmStopped = task?.alarmRequestCode?.let { commandExecutor.cancelScheduledReminder(it) }
             chatHistoryRepository.cancelTask(taskId)
             if (task != null) {
+                val detail = when (alarmStopped) {
+                    true -> "تم إلغاء المهمة/التذكير وإيقاف المنبه المجدول فعلياً."
+                    false -> "أُلغيت من القائمة، ولم يُعثر على منبه نظام نشط لإيقافه."
+                    null -> "تم إلغاء المهمة/التذكير من بطاقة الدردشة."
+                }
                 actionLogRepository.logAction(
                     title = "إلغاء «${task.title}»",
-                    details = "تم إلغاء المهمة/التذكير من بطاقة الدردشة.",
-                    status = ActionStatus.UNDONE,
+                    details = detail,
+                    status = if (alarmStopped == false) ActionStatus.UNVERIFIED else ActionStatus.UNDONE,
                     actionType = "CHAT_CANCEL_TASK"
                 )
             }
@@ -1674,11 +1935,16 @@ class CommandsViewModel(
                     isPaused = false,
                     isHandedOver = false,
                     statusNoticeAr = "بدأت تنفيذ الخطة خطوة بخطوة... ${AgentPromptRules.WAIT_THINKING_NOTICE_AR}",
+                    liveDoingNowAr = "أجهّز تنفيذ الخطوة الأولى من الخطة...",
+                    liveNextStepAr = currentState.plan.steps.firstOrNull()?.titleAr ?: "",
+                    liveWaitingForUserAr = "",
                     executionTruthReportAr = null
                 )
             }
             val succeededList = mutableListOf<String>()
+            val unverifiedList = mutableListOf<String>()
             val failedList = mutableListOf<String>()
+            val rolledBackList = mutableListOf<String>()
             var consecutiveEmpty = 0
             val overlayWatcherJob = launch {
                 while (isActive) {
@@ -1709,9 +1975,22 @@ class CommandsViewModel(
             }
 
             try {
-                var plan = currentState.plan
+                var plan = if (currentState.plan.isComplete && !singleStepOnly) {
+                    currentState.plan.copy(
+                        isComplete = false,
+                        isCancelled = false,
+                        steps = currentState.plan.steps.map {
+                            it.copy(
+                                status = StepStatus.PENDING,
+                                verificationStatus = StepVerificationStatus.AWAITING_VERIFICATION,
+                                verificationResultAr = null
+                            )
+                        }
+                    )
+                } else {
+                    currentState.plan
+                }
                 val steps = plan.steps.toMutableList()
-                var planApprovedForSensitive = false
                 val installed = ensureInstalledAppsLoaded()
 
                 for (index in steps.indices) {
@@ -1724,8 +2003,20 @@ class CommandsViewModel(
                         continue
                     }
 
+                    val upcomingStep = steps.drop(index + 1).firstOrNull()
                     val stepNotice = "الخطوة ${step.stepNumber}/${steps.size}: ${step.titleAr}"
-                    _state.update { it.copy(statusNoticeAr = "$stepNotice — ${AgentPromptRules.WAIT_THINKING_NOTICE_AR}") }
+                    _state.update {
+                        it.copy(
+                            statusNoticeAr = "$stepNotice — ${AgentPromptRules.WAIT_THINKING_NOTICE_AR}",
+                            liveDoingNowAr = "أنفّذ الخطوة ${step.stepNumber}/${steps.size}: ${step.titleAr}",
+                            liveNextStepAr = upcomingStep?.let { next ->
+                                "الخطوة ${next.stepNumber}: ${next.titleAr}"
+                            } ?: "التحقق النهائي وإصدار تقرير الصدق",
+                            liveWaitingForUserAr = if (step.requiresApproval) {
+                                "ستُطلب موافقتك قبل التنفيذ"
+                            } else ""
+                        )
+                    }
                     floatingControlManager.updateStatus(stepNotice, executionController.isPaused.value)
 
                     val stepPolicy = agentPolicy.validateStep(step)
@@ -1743,13 +2034,20 @@ class CommandsViewModel(
                         )
                         failedList.add("الخطوة ${step.stepNumber} (${step.titleAr}): ${stepPolicy.reasonAr}")
                         plan = plan.copy(steps = steps.toList(), isCancelled = true)
-                        val report = buildTruthReport(succeededList, failedList)
+                        val report = buildTruthReport(succeededList, unverifiedList, failedList, rolledBackList)
                         chatHistoryRepository.addAgentMessage(stepPolicy.reasonAr, ChatMessageType.ERROR)
+                        if (!report.isNullOrBlank()) {
+                            chatHistoryRepository.addAgentMessage(report, ChatMessageType.TEXT)
+                            recordConversationTurn("تقرير تنفيذ: ${plan.originalCommand}", report)
+                        }
                         _state.update {
                             it.copy(
                                 uiState = CommandsUiState.PlanActive(plan),
                                 isExecuting = false,
                                 statusNoticeAr = "",
+                                liveDoingNowAr = "",
+                                liveNextStepAr = "",
+                                liveWaitingForUserAr = "",
                                 executionTruthReportAr = report
                             )
                         }
@@ -1757,84 +2055,59 @@ class CommandsViewModel(
                         return@launch
                     }
 
-                    if (step.requiresApproval && !planApprovedForSensitive) {
+                    var stepApprovalToken: com.example.policy.GateApprovalToken? = null
+                    if (sensitiveActionGate.requiresApprovalForStep(step)) {
                         steps[index] = step.copy(status = StepStatus.AWAITING_APPROVAL)
                         plan = plan.copy(steps = steps.toList())
-                        val pendingLogId = actionLogRepository.logAction(
-                            title = "طلب موافقة على إجراء حساس: ${step.titleAr}",
-                            details = "عرض الخطة كاملة (${steps.size} خطوات) | السبب: ${step.safetyReasonAr.ifBlank { step.descriptionAr }}",
-                            status = ActionStatus.PENDING_APPROVAL,
-                            actionType = step.actionType.name
-                        )
-                        val deferred = CompletableDeferred<Boolean>()
-                        approvalDeferred = deferred
                         _state.update {
                             it.copy(
                                 uiState = CommandsUiState.PlanActive(plan),
-                                pendingApprovalStep = steps[index],
-                                pendingApprovalPlan = plan,
-                                pendingApprovalLogId = pendingLogId
+                                liveDoingNowAr = "بانتظار مراجعتك للخطوة الحساسة ${step.stepNumber}",
+                                liveWaitingForUserAr = "موافقتك الصريحة على: ${step.titleAr}"
                             )
                         }
-                        val approvalNotice = "بانتظار موافقتك: ${step.titleAr}"
-                        _state.update { it.copy(statusNoticeAr = approvalNotice) }
-                        floatingControlManager.updateStatus(
-                            approvalNotice,
-                            executionController.isPaused.value
+
+                        val gateResult = sensitiveActionGate.authorizeStep(
+                            step = steps[index],
+                            plan = plan,
+                            nextStep = upcomingStep
                         )
-                        speakIfEnabled("إجراء حساس: ${step.titleAr}. راجع الخطة كاملة ثم وافق أو ألغِ.")
-
-                        val approved = withTimeoutOrNull(120_000L) {
-                            deferred.await()
-                        } ?: false
-                        approvalDeferred = null
-                        _state.update {
-                            it.copy(
-                                pendingApprovalStep = null,
-                                pendingApprovalPlan = null,
-                                pendingApprovalLogId = null
-                            )
-                        }
-
-                        if (!approved) {
-                            actionLogRepository.updateStatus(pendingLogId, ActionStatus.CANCELLED)
-                            actionLogRepository.logAction(
-                                title = "رفض المستخدم تنفيذ: ${step.titleAr}",
-                                details = "أُلغيت الخطوة الحساسة بناءً على قرار المستخدم الصريح.",
-                                status = ActionStatus.CANCELLED,
-                                actionType = "USER_REJECTED_SENSITIVE"
-                            )
+                        if (!gateResult.approved) {
+                            val cancelReason = gateResult.reasonAr.ifBlank {
+                                if (gateResult.timedOut) {
+                                    "انتهت مهلة الموافقة (120 ثانية) على «${step.titleAr}» وأُلغي الإجراء احترازياً."
+                                } else {
+                                    "أُلغيت الخطوة الحساسة «${step.titleAr}» بناءً على قرارك."
+                                }
+                            }
                             steps[index] = step.copy(
                                 status = StepStatus.CANCELLED,
                                 verificationStatus = StepVerificationStatus.VERIFICATION_FAILED,
-                                verificationResultAr = "أُلغي بناءً على رفض المستخدم الصريح."
+                                verificationResultAr = cancelReason
                             )
-                            failedList.add("الخطوة ${step.stepNumber} (${step.titleAr}): رُفضت من المستخدم.")
+                            failedList.add("الخطوة ${step.stepNumber} (${step.titleAr}): $cancelReason")
                             plan = plan.copy(steps = steps.toList(), isCancelled = true)
-                            val report = buildTruthReport(succeededList, failedList)
-                            chatHistoryRepository.addAgentMessage(
-                                "أُلغيت الخطوة الحساسة «${step.titleAr}» بناءً على قرارك.",
-                                ChatMessageType.TEXT
-                            )
+                            val report = buildTruthReport(succeededList, unverifiedList, failedList, rolledBackList)
+                            chatHistoryRepository.addAgentMessage(cancelReason, ChatMessageType.TEXT)
+                            if (!report.isNullOrBlank()) {
+                                chatHistoryRepository.addAgentMessage(report, ChatMessageType.TEXT)
+                                recordConversationTurn("تقرير تنفيذ: ${plan.originalCommand}", report)
+                            }
                             _state.update {
                                 it.copy(
                                     uiState = CommandsUiState.PlanActive(plan),
                                     isExecuting = false,
                                     statusNoticeAr = "",
+                                    liveDoingNowAr = "",
+                                    liveNextStepAr = "",
+                                    liveWaitingForUserAr = "",
                                     executionTruthReportAr = report
                                 )
                             }
+                            speakIfEnabled(cancelReason)
                             return@launch
-                        } else {
-                            planApprovedForSensitive = true
-                            actionLogRepository.updateStatus(pendingLogId, ActionStatus.SUCCESS)
-                            actionLogRepository.logAction(
-                                title = "موافقة صريحة من المستخدم على: ${step.titleAr}",
-                                details = "وافق المستخدم على الخطة الحساسة بعد مراجعتها.",
-                                status = ActionStatus.SUCCESS,
-                                actionType = "USER_APPROVED_SENSITIVE"
-                            )
                         }
+                        stepApprovalToken = gateResult.approvalToken
                     }
 
                     executionController.awaitIfPaused()
@@ -1843,12 +2116,27 @@ class CommandsViewModel(
                         verificationStatus = StepVerificationStatus.AWAITING_VERIFICATION
                     )
                     plan = plan.copy(steps = steps.toList())
-                    _state.update { it.copy(uiState = CommandsUiState.PlanActive(plan)) }
+                    _state.update {
+                        it.copy(
+                            uiState = CommandsUiState.PlanActive(plan),
+                            liveDoingNowAr = "أنفّذ وأتحقق من الخطوة ${step.stepNumber}: ${step.titleAr}",
+                            liveWaitingForUserAr = ""
+                        )
+                    }
 
-                    val outcome = commandExecutor.executeStep(steps[index], installed)
+                    val outcome = commandExecutor.executeStep(
+                        step = steps[index],
+                        installedApps = installed,
+                        approvalToken = stepApprovalToken
+                    )
 
+                    val resolvedStepStatus = when {
+                        outcome.success -> StepStatus.COMPLETED
+                        outcome.unableToVerify -> StepStatus.UNVERIFIED
+                        else -> StepStatus.FAILED
+                    }
                     steps[index] = steps[index].copy(
-                        status = if (outcome.success) StepStatus.COMPLETED else StepStatus.FAILED,
+                        status = resolvedStepStatus,
                         verificationStatus = outcome.verification.status,
                         verificationResultAr = "${outcome.messageAr}\nحالة التحقق: ${outcome.verification.status.labelAr} — ${outcome.verification.explanationAr}"
                     )
@@ -1858,12 +2146,24 @@ class CommandsViewModel(
                     )
                     _state.update { it.copy(uiState = CommandsUiState.PlanActive(plan)) }
 
-                    if (outcome.success) {
-                        succeededList.add("الخطوة ${step.stepNumber} (${step.titleAr}): ${outcome.messageAr}")
-                        speakIfEnabled(outcome.messageAr)
-                    } else {
-                        failedList.add("الخطوة ${step.stepNumber} (${step.titleAr}): ${outcome.messageAr}")
-                        speakIfEnabled(outcome.verification.explanationAr)
+                    when {
+                        outcome.success -> {
+                            succeededList.add("الخطوة ${step.stepNumber} (${step.titleAr}): ${outcome.messageAr}")
+                            speakIfEnabled(outcome.messageAr)
+                        }
+                        outcome.unableToVerify -> {
+                            unverifiedList.add(
+                                "الخطوة ${step.stepNumber} (${step.titleAr}): ${outcome.messageAr} — ${outcome.verification.explanationAr}"
+                            )
+                            speakIfEnabled(outcome.messageAr)
+                        }
+                        else -> {
+                            failedList.add("الخطوة ${step.stepNumber} (${step.titleAr}): ${outcome.messageAr}")
+                            speakIfEnabled(outcome.verification.explanationAr)
+                        }
+                    }
+                    if (outcome.rolledBack) {
+                        rolledBackList.add("الخطوة ${step.stepNumber} (${step.titleAr}): تم التراجع التلقائي الآمن")
                     }
 
                     if (!outcome.success || !outcome.verification.verified || singleStepOnly) {
@@ -1871,9 +2171,10 @@ class CommandsViewModel(
                     }
                 }
 
-                val report = buildTruthReport(succeededList, failedList)
+                val report = buildTruthReport(succeededList, unverifiedList, failedList, rolledBackList)
                 if (!report.isNullOrBlank()) {
                     chatHistoryRepository.addAgentMessage(report, ChatMessageType.TEXT)
+                    recordConversationTurn("تقرير تنفيذ: ${plan.originalCommand}", report)
                 }
                 _state.update { it.copy(executionTruthReportAr = report) }
             } catch (e: CancellationException) {
@@ -1896,7 +2197,10 @@ class CommandsViewModel(
                         isExecuting = false,
                         isPaused = false,
                         isHandedOver = false,
-                        statusNoticeAr = ""
+                        statusNoticeAr = "",
+                        liveDoingNowAr = "",
+                        liveNextStepAr = "",
+                        liveWaitingForUserAr = ""
                     )
                 }
             }
@@ -2073,39 +2377,58 @@ class CommandsViewModel(
                 val directive = meta.value
 
                 if (directive.shouldAct) {
-                    val executed = generalGameEngine.executeMiniChatDirectiveAction(
+                    val gateOutcome = generalGameEngine.executeMiniChatDirectiveWithGate(
                         service = service,
                         directive = directive,
                         observation = observation
                     )
-                    if (!executed) {
+                    if (!gateOutcome.executed) {
                         val targetLabel = directive.targetText.ifBlank { command.take(30) }
-                        val failMsg = "تعذّر الضغط على «$targetLabel» — هل ترى الزر على الشاشة؟"
-                        actionLogRepository.logAction(
-                            title = "تعذّر تنفيذ الضغط من الدردشة",
-                            details = "$command | $failMsg",
-                            status = ActionStatus.FAILED,
-                            actionType = "MINI_CHAT_ACTION_FAILED"
-                        )
+                        val failMsg = if (gateOutcome.blockedByGate) {
+                            gateOutcome.gateReasonAr.ifBlank {
+                                "تم إيقاف الإجراء «$targetLabel» بانتظار موافقة صريحة."
+                            }
+                        } else {
+                            "تعذّر الضغط على «$targetLabel» — هل ترى الزر على الشاشة؟"
+                        }
+                        if (!gateOutcome.blockedByGate) {
+                            actionLogRepository.logAction(
+                                title = "تعذّر تنفيذ الضغط من الدردشة",
+                                details = "$command | $failMsg",
+                                status = ActionStatus.FAILED,
+                                actionType = "MINI_CHAT_ACTION_FAILED"
+                            )
+                        }
                         recordConversationTurn(command, failMsg)
-                        chatHistoryRepository.addAgentMessage(failMsg, ChatMessageType.ERROR)
+                        chatHistoryRepository.addAgentMessage(
+                            failMsg,
+                            if (gateOutcome.blockedByGate) ChatMessageType.TEXT else ChatMessageType.ERROR
+                        )
                         _state.update {
                             it.copy(
                                 isBusyWorking = false,
                                 statusNoticeAr = "",
                                 lastSpokenReply = failMsg,
-                                activeError = CompactErrorState(
-                                    titleAr = "تعذّر الضغط على «$targetLabel»",
-                                    summaryAr = failMsg,
-                                    technicalDetails = "action=${directive.action}, target=$targetLabel",
-                                    retryCommand = command,
-                                    retryType = ErrorRetryType.MINI_CHAT
-                                )
+                                activeError = if (gateOutcome.blockedByGate) {
+                                    null
+                                } else {
+                                    CompactErrorState(
+                                        titleAr = "تعذّر الضغط على «$targetLabel»",
+                                        summaryAr = failMsg,
+                                        technicalDetails = "action=${directive.action}, target=$targetLabel",
+                                        retryCommand = command,
+                                        retryType = ErrorRetryType.MINI_CHAT
+                                    )
+                                }
                             )
                         }
                         speakIfEnabled(failMsg)
-                        floatingControlManager.showMiniChatReply(failMsg) {
-                            submitMiniChatCommand(command)
+                        if (gateOutcome.blockedByGate) {
+                            floatingControlManager.showMiniChatReply(failMsg)
+                        } else {
+                            floatingControlManager.showMiniChatReply(failMsg) {
+                                submitMiniChatCommand(command)
+                            }
                         }
                         return@launch
                     }
@@ -2237,9 +2560,11 @@ class CommandsViewModel(
         activeTaskJob?.cancel()
         executionJob?.cancel()
         gameLoopJob?.cancel()
+        geminiTimerJob?.cancel()
         activeTaskJob = null
         executionJob = null
         gameLoopJob = null
+        geminiTimerJob = null
 
         executionController.reset()
         approvalDeferred?.complete(false)
@@ -2276,15 +2601,22 @@ class CommandsViewModel(
                 isHandedOver = false,
                 isListening = false,
                 statusNoticeAr = "",
+                liveDoingNowAr = "",
+                liveNextStepAr = "",
+                liveWaitingForUserAr = "",
+                geminiElapsedSeconds = 0,
                 pendingApprovalStep = null,
                 pendingApprovalPlan = null,
+                pendingApprovalNextStep = null,
                 pendingApprovalLogId = null,
+                pendingTaskCancelConfirmation = null,
                 lastSpokenReply = chatMessage
             )
         }
 
         viewModelScope.launch {
             floatingControlManager.dismiss()
+            recordConversationTurn("إيقاف المهمة", chatMessage)
             chatHistoryRepository.addAgentMessage(chatMessage, ChatMessageType.STOPPED)
             actionLogRepository.logAction(
                 title = logTitle,
@@ -2292,6 +2624,95 @@ class CommandsViewModel(
                 status = ActionStatus.CANCELLED,
                 actionType = logActionType
             )
+        }
+    }
+
+    private suspend fun requestUserApprovalViaUi(request: SensitiveActionRequest): Boolean {
+        val displayStep = request.step ?: AgentPlanStep(
+            stepNumber = 1,
+            titleAr = request.titleAr,
+            descriptionAr = request.descriptionAr,
+            actionType = request.actionType ?: StepActionType.TAP_ELEMENT,
+            targetAppName = request.targetAppName,
+            targetQueryOrText = request.targetText,
+            requiresApproval = true,
+            safetyReasonAr = request.safetyReasonAr
+        )
+        val pendingLogId = actionLogRepository.logAction(
+            title = "طلب موافقة على إجراء حساس: ${request.titleAr}",
+            details = "المصدر: ${request.source.titleAr} | السبب: ${request.safetyReasonAr.ifBlank { request.descriptionAr }}",
+            status = ActionStatus.PENDING_APPROVAL,
+            actionType = (request.actionType ?: StepActionType.TAP_ELEMENT).name
+        )
+        val deferred = CompletableDeferred<Boolean>()
+        approvalDeferred = deferred
+        _state.update {
+            it.copy(
+                pendingApprovalStep = displayStep,
+                pendingApprovalPlan = request.plan,
+                pendingApprovalNextStep = request.nextStep,
+                pendingApprovalLogId = pendingLogId,
+                statusNoticeAr = "بانتظار موافقتك: ${request.titleAr}"
+            )
+        }
+        val approvalNotice = "بانتظار موافقتك: ${request.titleAr}"
+        floatingControlManager.updateStatus(approvalNotice, executionController.isPaused.value)
+        if (request.source != SensitiveActionSource.PLAN_STEP ||
+            _state.value.isGameplayRunning ||
+            floatingControlManager.isMiniChatOpen()
+        ) {
+            floatingControlManager.showApprovalPrompt(
+                titleAr = request.titleAr,
+                detailsAr = request.descriptionAr
+            )
+        }
+        speakIfEnabled("إجراء حساس: ${request.titleAr}. وافق أو ألغِ.")
+
+        var approved = false
+        var completed = false
+        return try {
+            approved = deferred.await()
+            completed = true
+            if (approved) {
+                actionLogRepository.updateStatus(pendingLogId, ActionStatus.SUCCESS)
+                actionLogRepository.logAction(
+                    title = "موافقة صريحة من المستخدم على: ${request.titleAr}",
+                    details = "وافق المستخدم بعد مراجعة تفاصيل الإجراء (${request.source.titleAr}).",
+                    status = ActionStatus.SUCCESS,
+                    actionType = "USER_APPROVED_SENSITIVE"
+                )
+            } else {
+                actionLogRepository.updateStatus(pendingLogId, ActionStatus.CANCELLED)
+                actionLogRepository.logAction(
+                    title = "رفض المستخدم تنفيذ: ${request.titleAr}",
+                    details = "أُلغي الإجراء الحساس بناءً على قرار المستخدم الصريح (${request.source.titleAr}).",
+                    status = ActionStatus.CANCELLED,
+                    actionType = "USER_REJECTED_SENSITIVE"
+                )
+            }
+            approved
+        } finally {
+            withContext(NonCancellable) {
+                if (!completed) {
+                    actionLogRepository.updateStatus(pendingLogId, ActionStatus.CANCELLED)
+                    actionLogRepository.logAction(
+                        title = "انتهاء مهلة أو إلغاء الموافقة: ${request.titleAr}",
+                        details = "انتهت مهلة الموافقة (120 ثانية) أو أُلغي الانتظار احترازياً.",
+                        status = ActionStatus.CANCELLED,
+                        actionType = "APPROVAL_TIMEOUT"
+                    )
+                }
+                approvalDeferred = null
+                _state.update {
+                    it.copy(
+                        pendingApprovalStep = null,
+                        pendingApprovalPlan = null,
+                        pendingApprovalNextStep = null,
+                        pendingApprovalLogId = null
+                    )
+                }
+                floatingControlManager.hideApprovalPrompt()
+            }
         }
     }
 
@@ -2320,6 +2741,10 @@ class CommandsViewModel(
             override fun onMiniChatMicClick() {
                 toggleMiniChatMic()
             }
+
+            override fun onApproveSensitiveAction(approved: Boolean) {
+                resolveApproval(approved)
+            }
         }
     }
 
@@ -2333,6 +2758,8 @@ class CommandsViewModel(
 
     fun resetToIdle() {
         executionJob?.cancel()
+        geminiTimerJob?.cancel()
+        geminiTimerJob = null
         executionController.reset()
         _state.update {
             it.copy(
@@ -2340,9 +2767,14 @@ class CommandsViewModel(
                 uiState = CommandsUiState.Idle,
                 pendingApprovalStep = null,
                 pendingApprovalPlan = null,
+                pendingApprovalNextStep = null,
                 isExecuting = false,
                 isPaused = false,
                 statusNoticeAr = "",
+                liveDoingNowAr = "",
+                liveNextStepAr = "",
+                liveWaitingForUserAr = "",
+                geminiElapsedSeconds = 0,
                 executionTruthReportAr = null
             )
         }
@@ -2431,26 +2863,50 @@ class CommandsViewModel(
         return arr.toString()
     }
 
-    private fun buildTruthReport(succeeded: List<String>, failed: List<String>): String? {
-        if (succeeded.isEmpty() && failed.isEmpty()) return null
-        return buildString {
-            if (succeeded.isNotEmpty()) {
-                appendLine("✅ ما نجح فعلياً:")
-                succeeded.forEach { appendLine("• $it") }
-            }
-            if (failed.isNotEmpty()) {
-                if (succeeded.isNotEmpty()) appendLine()
-                appendLine("❌ ما فشل ولماذا:")
-                failed.forEach { appendLine("• $it") }
-            }
-        }.trim()
-    }
-
     override fun onCleared() {
         super.onCleared()
+        sensitiveActionGate.setApprovalHandler(null)
         ScreenStateBridge.setTaskActive(false)
         runCatching { appContext.unregisterReceiver(packageChangeReceiver) }
         voiceManager.release()
+    }
+
+    companion object {
+        internal fun buildTruthReport(
+            succeeded: List<String>,
+            unverified: List<String> = emptyList(),
+            failed: List<String> = emptyList(),
+            rolledBack: List<String> = emptyList()
+        ): String? {
+            if (succeeded.isEmpty() && unverified.isEmpty() && failed.isEmpty() && rolledBack.isEmpty()) {
+                return null
+            }
+            return buildString {
+                var hasPrevious = false
+                if (succeeded.isNotEmpty()) {
+                    appendLine("✅ ما نجح فعلياً:")
+                    succeeded.forEach { appendLine("• $it") }
+                    hasPrevious = true
+                }
+                if (unverified.isNotEmpty()) {
+                    if (hasPrevious) appendLine()
+                    appendLine("⚠️ ما تعذّر التحقق منه:")
+                    unverified.forEach { appendLine("• $it") }
+                    hasPrevious = true
+                }
+                if (failed.isNotEmpty()) {
+                    if (hasPrevious) appendLine()
+                    appendLine("❌ ما فشل ولماذا:")
+                    failed.forEach { appendLine("• $it") }
+                    hasPrevious = true
+                }
+                if (rolledBack.isNotEmpty()) {
+                    if (hasPrevious) appendLine()
+                    appendLine("↩️ ما تم التراجع عنه:")
+                    rolledBack.forEach { appendLine("• $it") }
+                }
+            }.trim()
+        }
     }
 
     class Factory(
@@ -2466,6 +2922,7 @@ class CommandsViewModel(
         private val floatingControlManager: AgentFloatingControlManager,
         private val appContext: Context,
         private val agentPolicy: AgentPolicy = AgentPolicy(),
+        private val sensitiveActionGate: SensitiveActionGate = SensitiveActionGate(agentPolicy),
         private val phoneFileManager: PhoneFileManager = PhoneFileManager(
             context = appContext,
             actionLogRepository = actionLogRepository,
@@ -2487,6 +2944,7 @@ class CommandsViewModel(
                 floatingControlManager = floatingControlManager,
                 appContext = appContext,
                 agentPolicy = agentPolicy,
+                sensitiveActionGate = sensitiveActionGate,
                 phoneFileManager = phoneFileManager
             ) as T
         }

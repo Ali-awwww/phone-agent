@@ -21,6 +21,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Undo
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
@@ -31,7 +34,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -70,6 +75,7 @@ fun ActionLogScreen(
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    var showClearLogsConfirmDialog by remember { mutableStateOf(false) }
 
     Box(
         modifier = modifier.fillMaxSize(),
@@ -97,7 +103,7 @@ fun ActionLogScreen(
                 )
                 if (state.logs.isNotEmpty()) {
                     TextButton(
-                        onClick = { viewModel.clearAllLogs() },
+                        onClick = { showClearLogsConfirmDialog = true },
                         modifier = Modifier.testTag("clear_logs_button")
                     ) {
                         Icon(Icons.Rounded.DeleteSweep, contentDescription = null, tint = StatusCancelled)
@@ -105,6 +111,56 @@ fun ActionLogScreen(
                         Text(stringResource(R.string.logs_clear), color = StatusCancelled)
                     }
                 }
+            }
+
+            if (showClearLogsConfirmDialog) {
+                AlertDialog(
+                    onDismissRequest = { showClearLogsConfirmDialog = false },
+                    containerColor = CyberSurfaceNavy,
+                    titleContentColor = StatusCancelled,
+                    textContentColor = CyberTextPrimary,
+                    title = {
+                        Text(
+                            text = "تأكيد مسح سجل التنفيذ",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    },
+                    text = {
+                        Text(
+                            text = "سيتم حذف جميع سجلات التنفيذ السابقة نهائياً ولا يمكن التراجع عن ذلك. هل تريد المتابعة؟",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                showClearLogsConfirmDialog = false
+                                viewModel.clearAllLogs()
+                            },
+                            modifier = Modifier
+                                .height(48.dp)
+                                .testTag("confirm_clear_logs_button"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = StatusCancelled,
+                                contentColor = Color.White
+                            )
+                        ) {
+                            Text("نعم، امسح السجل", fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    dismissButton = {
+                        OutlinedButton(
+                            onClick = { showClearLogsConfirmDialog = false },
+                            modifier = Modifier
+                                .height(48.dp)
+                                .testTag("cancel_clear_logs_button"),
+                            border = BorderStroke(1.dp, CyberBorderGlow)
+                        ) {
+                            Text("إلغاء", color = CyberTextPrimary)
+                        }
+                    }
+                )
             }
 
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -125,6 +181,7 @@ fun ActionLogScreen(
                 }
                 val primaryStatuses = listOf(
                     ActionStatus.SUCCESS,
+                    ActionStatus.UNVERIFIED,
                     ActionStatus.PENDING_APPROVAL,
                     ActionStatus.CANCELLED,
                     ActionStatus.FAILED
@@ -206,6 +263,25 @@ fun ActionLogScreen(
                             onUndo = { viewModel.undoAction(log) }
                         )
                     }
+                    if (state.hasMoreLogs) {
+                        item(key = "load_more_logs") {
+                            OutlinedButton(
+                                onClick = { viewModel.loadMoreLogs() },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("load_more_logs_button"),
+                                shape = MaterialTheme.shapes.small,
+                                border = BorderStroke(1.dp, CyberElectricCyan)
+                            ) {
+                                Text(
+                                    text = "تحميل المزيد (${state.logs.size} / ${state.totalCount})",
+                                    color = CyberElectricCyan,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -220,7 +296,7 @@ private fun ActionLogItemCard(
     val status = ActionStatus.fromName(log.status)
     val (bgColor, fgColor) = when (status) {
         ActionStatus.SUCCESS -> StatusSuccessContainer to StatusSuccess
-        ActionStatus.PENDING_APPROVAL -> StatusPendingContainer to StatusPending
+        ActionStatus.PENDING_APPROVAL, ActionStatus.UNVERIFIED -> StatusPendingContainer to StatusPending
         ActionStatus.CANCELLED, ActionStatus.FAILED -> StatusCancelledContainer to StatusCancelled
         ActionStatus.UNDONE -> CyberSurfaceElevated to CyberTextSecondary
     }

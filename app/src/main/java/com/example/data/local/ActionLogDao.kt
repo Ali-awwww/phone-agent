@@ -8,8 +8,14 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ActionLogDao {
-    @Query("SELECT * FROM action_logs ORDER BY timestamp DESC")
+    @Query("SELECT * FROM action_logs WHERE actionType NOT LIKE 'MODEL_ROUTE_%' ORDER BY timestamp DESC")
     fun observeAllLogs(): Flow<List<ActionLogEntity>>
+
+    @Query("SELECT * FROM action_logs WHERE actionType NOT LIKE 'MODEL_ROUTE_%' ORDER BY timestamp DESC LIMIT :limit")
+    fun observePagedLogs(limit: Int): Flow<List<ActionLogEntity>>
+
+    @Query("SELECT COUNT(*) FROM action_logs WHERE actionType NOT LIKE 'MODEL_ROUTE_%'")
+    fun observeLogsCount(): Flow<Int>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertLog(log: ActionLogEntity): Long

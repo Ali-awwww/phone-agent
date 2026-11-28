@@ -293,39 +293,26 @@ class ScreenVerifier(
             }
         }
 
-        // إذا كانت خدمة الوصول غير متصلة لخطوات Intent الرسمية نعتمد نتيجة النظام مع الصدق التام
+        // دون لقطة شاشة فعلية لا يُسجَّل أي إجراء كـ VERIFIED_ON_SCREEN إطلاقاً
         if (postSnapshot == null) {
-            val status = if (step.actionType in listOf(
-                    StepActionType.SET_ALARM,
-                    StepActionType.SET_REMINDER,
-                    StepActionType.SEND_MESSAGE,
-                    StepActionType.CHANGE_SETTING,
-                    StepActionType.OPEN_APP,
-                    StepActionType.SPEAK_ANSWER
-                )
-            ) {
-                StepVerificationStatus.VERIFIED_ON_SCREEN
-            } else {
-                StepVerificationStatus.VERIFICATION_FAILED
-            }
             return ScreenVerificationResult(
-                verified = status == StepVerificationStatus.VERIFIED_ON_SCREEN,
-                status = status,
-                explanationAr = if (status == StepVerificationStatus.VERIFIED_ON_SCREEN) {
-                    "تم استدعاء واجهة النظام الرسمية بنجاح."
-                } else {
-                    "تعذر التحقق من الشاشة لأن خدمة إمكانية الوصول غير مفعلة."
-                }
+                verified = false,
+                status = StepVerificationStatus.UNABLE_TO_VERIFY,
+                explanationAr = "تعذّر التحقق من الشاشة لعدم توفر لقطة شاشة (خدمة إمكانية الوصول غير مفعلة أو لم تصل لقطة بعد)."
             )
         }
 
         val geminiVerdict = geminiRepository.verifyScreenAfterStep(step, postSnapshot)
         val finalStatus = when {
             geminiVerdict.sensitiveUiDetected -> StepVerificationStatus.VERIFICATION_FAILED
+            geminiVerdict.status == StepVerificationStatus.UNABLE_TO_VERIFY -> StepVerificationStatus.UNABLE_TO_VERIFY
             geminiVerdict.verified -> StepVerificationStatus.VERIFIED_ON_SCREEN
             else -> StepVerificationStatus.VERIFICATION_FAILED
         }
-        return geminiVerdict.copy(status = finalStatus)
+        return geminiVerdict.copy(
+            verified = finalStatus == StepVerificationStatus.VERIFIED_ON_SCREEN,
+            status = finalStatus
+        )
     }
 
     fun matchRealInstalledApp(

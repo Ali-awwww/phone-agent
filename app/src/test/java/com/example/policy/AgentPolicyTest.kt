@@ -163,4 +163,53 @@ class AgentPolicyTest {
         )
         assertTrue(valid.allowed)
     }
+
+    @Test
+    fun `rejects single-word and synonym forbidden patterns including delete this, format, uninstall, and OTP`() {
+        val deleteThis = policy.evaluateCommand("احذف هذا")
+        assertFalse(deleteThis.allowed)
+        assertEquals(ForbiddenCategory.DATA_DELETION, deleteThis.violationCategory)
+
+        val formatDevice = policy.evaluateCommand("فرمت الهاتف")
+        assertFalse(formatDevice.allowed)
+        assertEquals(ForbiddenCategory.DATA_DELETION, formatDevice.violationCategory)
+
+        val uninstallApp = policy.evaluateCommand("إلغاء تثبيت واتساب")
+        assertFalse(uninstallApp.allowed)
+        assertEquals(ForbiddenCategory.DATA_DELETION, uninstallApp.violationCategory)
+
+        val otpRequest = policy.evaluateCommand("أدخل رمز التحقق OTP")
+        assertFalse(otpRequest.allowed)
+        assertEquals(ForbiddenCategory.PASSWORDS, otpRequest.violationCategory)
+
+        // لا يُسمح بتمرير «احذف هذا» تحت غطاء تنظيف المجلدات الفارغة
+        assertFalse(policy.evaluateCommand("افحص المجلدات الفارغة ثم احذف هذا").allowed)
+    }
+
+    @Test
+    fun `validateAction inspects actionType, targetText, and description accurately`() {
+        val inputOtp = policy.validateAction(
+            actionType = StepActionType.INPUT_TEXT,
+            targetText = "حقل الإدخال",
+            description = "اكتب رمز التحقق OTP هنا"
+        )
+        assertFalse(inputOtp.allowed)
+        assertEquals(ForbiddenCategory.PASSWORDS, inputOtp.violationCategory)
+
+        val tapDeleteThis = policy.validateAction(
+            actionType = StepActionType.TAP_ELEMENT,
+            targetText = "احذف هذا",
+            description = "انقر على العنصر"
+        )
+        assertFalse(tapDeleteThis.allowed)
+        assertEquals(ForbiddenCategory.DATA_DELETION, tapDeleteThis.violationCategory)
+
+        // النقر على «إرسال» مسموح في السياسة ليصل إلى بوابة الموافقة الصريحة
+        val tapSend = policy.validateAction(
+            actionType = StepActionType.TAP_ELEMENT,
+            targetText = "إرسال",
+            description = "النقر على زر الإرسال"
+        )
+        assertTrue("Sending UI tap should pass policy so SensitiveActionGate prompts user", tapSend.allowed)
+    }
 }

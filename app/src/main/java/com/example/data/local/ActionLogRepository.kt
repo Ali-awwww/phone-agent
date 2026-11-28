@@ -7,6 +7,15 @@ class ActionLogRepository(
 ) {
     val allLogs: Flow<List<ActionLogEntity>> = dao.observeAllLogs()
 
+    fun observePagedLogs(limit: Int = DEFAULT_PAGE_SIZE): Flow<List<ActionLogEntity>> =
+        dao.observePagedLogs(limit.coerceAtLeast(1))
+
+    fun observeLogsCount(): Flow<Int> = dao.observeLogsCount()
+
+    companion object {
+        const val DEFAULT_PAGE_SIZE = 50
+    }
+
     suspend fun logAction(
         title: String,
         details: String,

@@ -16,6 +16,8 @@ import com.example.overlay.FloatingControlCallbacks
 import com.example.permissions.PermissionHelper
 import com.example.policy.AgentPolicy
 import com.example.policy.AgentPromptRules
+import com.example.policy.SensitiveActionGate
+import com.example.policy.SensitiveActionSource
 import com.example.service.GameScreenObservation
 import com.example.service.PhoneAgentAccessibilityService
 import com.example.service.ScreenStateBridge
@@ -43,6 +45,14 @@ data class GameLoopResult(
     val summaryAr: String
 )
 
+data class GestureGateExecutionResult(
+    val executed: Boolean,
+    val blockedByGate: Boolean = false,
+    val blockedByPolicy: Boolean = false,
+    val timedOut: Boolean = false,
+    val gateReasonAr: String = ""
+)
+
 /**
  * محرك لعب عام غير مرتبط بأي لعبة بعينها:
  * - يتحقق من الشاشة الحقيقية عبر شجرة إمكانية الوصول دون اختراع عناصر.
@@ -55,7 +65,8 @@ class GeneralGameEngine(
     private val actionLogRepository: ActionLogRepository,
     private val agentPolicy: AgentPolicy = AgentPolicy(),
     private val executionController: AgentExecutionController = AgentExecutionController(),
-    private val floatingControlManager: AgentFloatingControlManager = AgentFloatingControlManager(context)
+    private val floatingControlManager: AgentFloatingControlManager = AgentFloatingControlManager(context),
+    private val sensitiveActionGate: SensitiveActionGate = SensitiveActionGate(agentPolicy)
 ) {
 
     @Volatile
@@ -215,11 +226,24 @@ class GeneralGameEngine(
                 )
                 val decision = ChatIntentRouter.parseGameActionDecision(rawDecision)
 
-                val policyCheck = agentPolicy.findForbiddenCategory(
-                    "${decision.targetText} ${decision.reasonAr}"
+                val actionPolicy = agentPolicy.validateAction(
+                    actionType = when (decision.action) {
+                        GameGestureAction.TAP_TEXT, GameGestureAction.TAP_XY -> com.example.model.StepActionType.TAP_ELEMENT
+                        GameGestureAction.SCROLL, GameGestureAction.SWIPE -> com.example.model.StepActionType.SCROLL_SCREEN
+                        else -> null
+                    },
+                    targetText = decision.targetText,
+                    description = decision.reasonAr,
+                    targetAppName = observation.snapshot.packageName
                 )
-                if (policyCheck != null) {
-                    val blockedMsg = "توقف اللعب وفق سياسة الأمان (${policyCheck.titleAr})."
+                if (!actionPolicy.allowed) {
+                    val blockedMsg = "توقف اللعب وفق سياسة الأمان (${actionPolicy.violationCategory?.titleAr ?: actionPolicy.reasonAr})."
+                    actionLogRepository.logAction(
+                        title = "إيقاف حركة مخالفة للسياسة",
+                        details = blockedMsg,
+                        status = ActionStatus.CANCELLED,
+                        actionType = "GAME_POLICY_BLOCKED"
+                    )
                     return@coroutineScope GameLoopResult(false, executedCount, blockedMsg)
                 }
 
@@ -248,12 +272,26 @@ class GeneralGameEngine(
                     isPaused = executionController.isPaused.value
                 )
 
-                val gestureOk = executeGameDecision(service, decision, observation)
+                val gestureResult = executeGameDecisionWithGate(service, decision, observation)
+                if (gestureResult.blockedByPolicy) {
+                    return@coroutineScope GameLoopResult(
+                        completedNaturally = false,
+                        stepsExecuted = executedCount,
+                        summaryAr = gestureResult.gateReasonAr.ifBlank { "توقف اللعب وفق سياسة الأمان." }
+                    )
+                }
+                val gestureOk = gestureResult.executed
                 if (gestureOk) executedCount++
                 val stepDesc = buildString {
                     append("خطوة $cycle (${decision.action.name}): ")
                     append(decision.reasonAr.ifBlank { decision.targetText.ifBlank { "تنفيذ إيماءة على الشاشة" } })
-                    append(if (gestureOk) " ✓" else " (لم تستجب الشاشة أو لم أجد العنصر)")
+                    append(
+                        when {
+                            gestureOk -> " ✓"
+                            gestureResult.blockedByGate -> " (${gestureResult.gateReasonAr})"
+                            else -> " (لم تستجب الشاشة أو لم أجد العنصر)"
+                        }
+                    )
                 }
                 recentActions.add(stepDesc)
                 if (recentActions.size > 4) recentActions.removeAt(0)
@@ -307,13 +345,85 @@ class GeneralGameEngine(
         return matchedByCoords.centerXRatio to matchedByCoords.centerYRatio
     }
 
+    internal fun findObservedElementLabel(
+        observation: GameScreenObservation?,
+        targetText: String,
+        requestedX: Float,
+        requestedY: Float
+    ): String {
+        val elements = observation?.elements.orEmpty()
+        if (elements.isEmpty()) return ""
+        val cleanQuery = targetText.trim()
+        if (cleanQuery.isNotEmpty()) {
+            val matchedByText = elements.firstOrNull { el ->
+                el.label.isNotBlank() &&
+                    el.label != "عنصر تفاعلي" &&
+                    (el.label.contains(cleanQuery, ignoreCase = true) ||
+                        cleanQuery.contains(el.label, ignoreCase = true))
+            }
+            if (matchedByText != null) return matchedByText.label
+        }
+        val matchedByCoords = elements.firstOrNull { el ->
+            kotlin.math.abs(el.centerXRatio - requestedX) <= 0.08f &&
+                kotlin.math.abs(el.centerYRatio - requestedY) <= 0.08f
+        }
+        return matchedByCoords?.label?.takeIf { it != "عنصر تفاعلي" }.orEmpty()
+    }
+
     suspend fun executeMiniChatDirectiveAction(
         service: PhoneAgentAccessibilityService,
         directive: GeminiRepository.MiniChatDirectiveResult,
         observation: GameScreenObservation? = null
     ): Boolean {
-        if (!directive.shouldAct) return false
-        return when (directive.action) {
+        return executeMiniChatDirectiveWithGate(service, directive, observation).executed
+    }
+
+    suspend fun executeMiniChatDirectiveWithGate(
+        service: PhoneAgentAccessibilityService,
+        directive: GeminiRepository.MiniChatDirectiveResult,
+        observation: GameScreenObservation? = null
+    ): GestureGateExecutionResult {
+        if (!directive.shouldAct) {
+            return GestureGateExecutionResult(executed = false)
+        }
+
+        val observedLabel = findObservedElementLabel(
+            observation = observation,
+            targetText = directive.targetText,
+            requestedX = directive.x,
+            requestedY = directive.y
+        )
+        val gateResult = sensitiveActionGate.authorizeGestureAction(
+            source = SensitiveActionSource.MINI_CHAT,
+            action = directive.action,
+            targetText = directive.targetText,
+            inputText = directive.inputText,
+            reasonAr = directive.replyOneLineAr,
+            observedTargetLabel = observedLabel,
+            targetAppName = observation?.snapshot?.packageName.orEmpty()
+        )
+        if (!gateResult.approved) {
+            val tag = when {
+                gateResult.blockedByPolicy -> "MINI_CHAT_POLICY_BLOCKED"
+                gateResult.timedOut -> "MINI_CHAT_APPROVAL_TIMEOUT"
+                else -> "MINI_CHAT_USER_REJECTED"
+            }
+            actionLogRepository.logAction(
+                title = "منع تنفيذ توجيه شريط الدردشة",
+                details = gateResult.reasonAr,
+                status = ActionStatus.CANCELLED,
+                actionType = tag
+            )
+            return GestureGateExecutionResult(
+                executed = false,
+                blockedByGate = true,
+                blockedByPolicy = gateResult.blockedByPolicy,
+                timedOut = gateResult.timedOut,
+                gateReasonAr = gateResult.reasonAr
+            )
+        }
+
+        val executed = when (directive.action) {
             "TAP_TEXT" -> {
                 val clicked = withContext(Dispatchers.Main) {
                     directive.targetText.isNotBlank() && service.findAndClickHumanLike(directive.targetText)
@@ -326,8 +436,9 @@ class GeneralGameEngine(
                         targetText = directive.targetText,
                         requestedX = directive.x,
                         requestedY = directive.y
-                    ) ?: return false
-                    service.performTapAt(observedCoords.first, observedCoords.second)
+                    )
+                    if (observedCoords == null) false
+                    else service.performTapAt(observedCoords.first, observedCoords.second)
                 }
             }
             "TAP_XY" -> {
@@ -336,8 +447,9 @@ class GeneralGameEngine(
                     targetText = directive.targetText,
                     requestedX = directive.x,
                     requestedY = directive.y
-                ) ?: return false
-                service.performTapAt(observedCoords.first, observedCoords.second)
+                )
+                if (observedCoords == null) false
+                else service.performTapAt(observedCoords.first, observedCoords.second)
             }
             "SWIPE" -> service.performSwipe(directive.x, directive.y, directive.endX, directive.endY)
             "SCROLL" -> withContext(Dispatchers.Main) {
@@ -352,6 +464,7 @@ class GeneralGameEngine(
             }
             else -> false
         }
+        return GestureGateExecutionResult(executed = executed)
     }
 
     private fun buildGameObservationPrompt(
@@ -377,12 +490,57 @@ class GeneralGameEngine(
         """.trimIndent()
     }
 
-    private suspend fun executeGameDecision(
+    internal suspend fun executeGameDecision(
         service: PhoneAgentAccessibilityService,
         decision: GameActionDecision,
         observation: GameScreenObservation? = null
     ): Boolean {
-        return when (decision.action) {
+        return executeGameDecisionWithGate(service, decision, observation).executed
+    }
+
+    internal suspend fun executeGameDecisionWithGate(
+        service: PhoneAgentAccessibilityService,
+        decision: GameActionDecision,
+        observation: GameScreenObservation? = null
+    ): GestureGateExecutionResult {
+        if (decision.action != GameGestureAction.WAIT && decision.action != GameGestureAction.DONE) {
+            val observedLabel = findObservedElementLabel(
+                observation = observation,
+                targetText = decision.targetText,
+                requestedX = decision.x,
+                requestedY = decision.y
+            )
+            val gateResult = sensitiveActionGate.authorizeGestureAction(
+                source = SensitiveActionSource.GAMEPLAY_LOOP,
+                action = decision.action.name,
+                targetText = decision.targetText,
+                reasonAr = decision.reasonAr,
+                observedTargetLabel = observedLabel,
+                targetAppName = observation?.snapshot?.packageName.orEmpty()
+            )
+            if (!gateResult.approved) {
+                val tag = when {
+                    gateResult.blockedByPolicy -> "GAME_POLICY_BLOCKED"
+                    gateResult.timedOut -> "GAME_APPROVAL_TIMEOUT"
+                    else -> "GAME_USER_REJECTED"
+                }
+                actionLogRepository.logAction(
+                    title = "منع حركة في حلقة اللعب",
+                    details = gateResult.reasonAr,
+                    status = ActionStatus.CANCELLED,
+                    actionType = tag
+                )
+                return GestureGateExecutionResult(
+                    executed = false,
+                    blockedByGate = true,
+                    blockedByPolicy = gateResult.blockedByPolicy,
+                    timedOut = gateResult.timedOut,
+                    gateReasonAr = gateResult.reasonAr
+                )
+            }
+        }
+
+        val executed = when (decision.action) {
             GameGestureAction.TAP_TEXT -> {
                 val clicked = withContext(Dispatchers.Main) {
                     decision.targetText.isNotBlank() && service.findAndClickHumanLike(decision.targetText)
@@ -395,8 +553,9 @@ class GeneralGameEngine(
                         targetText = decision.targetText,
                         requestedX = decision.x,
                         requestedY = decision.y
-                    ) ?: return false
-                    service.performTapAt(observedCoords.first, observedCoords.second)
+                    )
+                    if (observedCoords == null) false
+                    else service.performTapAt(observedCoords.first, observedCoords.second)
                 }
             }
             GameGestureAction.TAP_XY -> {
@@ -405,8 +564,9 @@ class GeneralGameEngine(
                     targetText = decision.targetText,
                     requestedX = decision.x,
                     requestedY = decision.y
-                ) ?: return false
-                service.performTapAt(observedCoords.first, observedCoords.second)
+                )
+                if (observedCoords == null) false
+                else service.performTapAt(observedCoords.first, observedCoords.second)
             }
             GameGestureAction.SWIPE -> service.performSwipe(decision.x, decision.y, decision.endX, decision.endY)
             GameGestureAction.SCROLL -> withContext(Dispatchers.Main) {
@@ -421,5 +581,6 @@ class GeneralGameEngine(
             }
             GameGestureAction.DONE -> true
         }
+        return GestureGateExecutionResult(executed = executed)
     }
 }

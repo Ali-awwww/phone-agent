@@ -8,8 +8,13 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import java.util.Calendar
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class ChatIntentRouterTest {
 
     @Test
@@ -104,6 +109,20 @@ class ChatIntentRouterTest {
 
         val fallback = ChatIntentRouter.parseGameActionDecision("خطوة غير منسقة")
         assertEquals(GameGestureAction.WAIT, fallback.action)
+
+        val unknownAction = ChatIntentRouter.parseGameActionDecision(
+            """{"action":"TELEPORT_MAGIC","x":0.5,"y":0.5,"reasonAr":"محاولة غير صالحة"}"""
+        )
+        assertEquals(GameGestureAction.WAIT, unknownAction.action)
+        assertTrue(unknownAction.reasonAr.contains("غير معروف"))
+
+        val clampedAndQuoted = ChatIntentRouter.parseGameActionDecision(
+            """{"action":"TAP_XY","x":2.5,"y":-1.0,"reasonAr":"نص \"مقتبس\" بالداخل"}"""
+        )
+        assertEquals(GameGestureAction.TAP_XY, clampedAndQuoted.action)
+        assertEquals(0.98f, clampedAndQuoted.x, 0.001f)
+        assertEquals(0.02f, clampedAndQuoted.y, 0.001f)
+        assertEquals("نص \"مقتبس\" بالداخل", clampedAndQuoted.reasonAr)
     }
 
     @Test

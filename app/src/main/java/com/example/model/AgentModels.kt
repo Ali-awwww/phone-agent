@@ -45,8 +45,10 @@ enum class StepActionType {
 
     companion object {
         fun fromString(value: String?): StepActionType {
-            return entries.firstOrNull { it.name.equals(value, ignoreCase = true) }
-                ?: SPEAK_ANSWER
+            val normalized = value?.trim().orEmpty()
+            require(normalized.isNotEmpty()) { "نوع الإجراء مفقود أو فارغ." }
+            return entries.firstOrNull { it.name.equals(normalized, ignoreCase = true) }
+                ?: throw IllegalArgumentException("نوع إجراء غير معروف: $normalized")
         }
     }
 }
@@ -57,6 +59,7 @@ enum class StepStatus(val labelAr: String) {
     AWAITING_APPROVAL("بانتظار الموافقة"),
     VERIFYING("جاري التحقق من الشاشة"),
     COMPLETED("نجح"),
+    UNVERIFIED("تعذّر التحقق"),
     CANCELLED("أُلغي"),
     FAILED("تعذر التنفيذ")
 }
@@ -65,6 +68,7 @@ enum class StepVerificationStatus(val labelAr: String) {
     AWAITING_VERIFICATION("بانتظار التحقق"),
     VERIFIED_ON_SCREEN("تم التحقق من الشاشة"),
     NOT_FOUND_ON_SCREEN("غير موجود على الشاشة"),
+    UNABLE_TO_VERIFY("تعذّر التحقق"),
     VERIFICATION_FAILED("فشل التحقق")
 }
 
