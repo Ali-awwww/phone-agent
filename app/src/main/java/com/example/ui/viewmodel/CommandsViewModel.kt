@@ -166,6 +166,7 @@ data class CommandsScreenState(
     val liveDoingNowAr: String = "",
     val liveNextStepAr: String = "",
     val liveWaitingForUserAr: String = "",
+    val isPrivacyModeEnabled: Boolean = false,
     val geminiElapsedSeconds: Int = 0,
     val geminiTimeoutSeconds: Int = (com.example.data.ai.TOTAL_GEMINI_COMMAND_TIMEOUT_MS / 1000L).toInt()
 ) {
@@ -195,7 +196,8 @@ class CommandsViewModel(
         context = appContext,
         actionLogRepository = actionLogRepository,
         agentPolicy = agentPolicy
-    )
+    ),
+    private val privacyPreferences: com.example.security.PrivacyPreferences = com.example.security.PrivacyPreferences(appContext)
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(CommandsScreenState())
@@ -274,6 +276,10 @@ class CommandsViewModel(
     }
 
     private fun recordConversationTurn(userMessage: String, agentReply: String) {
+        if (privacyPreferences.isPrivacyModeEnabled()) {
+            conversationTurns.clear()
+            return
+        }
         val cleanUser = userMessage.trim()
         val cleanReply = agentReply.trim()
         if (cleanUser.isNotEmpty()) {
@@ -308,8 +314,18 @@ class CommandsViewModel(
         _state.update {
             it.copy(
                 appCheckDebugToken = debugToken,
-                activeProjectId = projId
+                activeProjectId = projId,
+                isPrivacyModeEnabled = privacyPreferences.isPrivacyModeEnabled()
             )
+        }
+        viewModelScope.launch {
+            privacyPreferences.privacyModeEnabled.collect { isEnabled ->
+                _state.update { it.copy(isPrivacyModeEnabled = isEnabled) }
+                if (isEnabled) {
+                    conversationTurns.clear()
+                    ScreenStateBridge.clearSnapshot()
+                }
+            }
         }
         observeInstalledApps()
         registerPackageChangeReceiver()
@@ -660,9 +676,14 @@ class CommandsViewModel(
 
                 val commandPolicy = agentPolicy.evaluateCommand(transcript, appLabels)
                 if (!commandPolicy.allowed) {
+                    val logDetails = if (privacyPreferences.isPrivacyModeEnabled()) {
+                        "السبب: ${commandPolicy.reasonAr}"
+                    } else {
+                        "${com.example.security.SensitiveDataScrubber.scrub(transcript)} | السبب: ${commandPolicy.reasonAr}"
+                    }
                     actionLogRepository.logAction(
                         title = "رفض أمر صوتي وفق سياسة الوكيل",
-                        details = "$transcript | السبب: ${commandPolicy.reasonAr}",
+                        details = logDetails,
                         status = ActionStatus.CANCELLED,
                         actionType = "POLICY_REJECTED_AUDIO"
                     )
@@ -690,9 +711,14 @@ class CommandsViewModel(
 
                 val planPolicy = agentPolicy.validatePlan(rawPlan)
                 if (!planPolicy.allowed) {
+                    val logDetails = if (privacyPreferences.isPrivacyModeEnabled()) {
+                        "السبب: ${planPolicy.reasonAr}"
+                    } else {
+                        "${com.example.security.SensitiveDataScrubber.scrub(transcript)} | السبب: ${planPolicy.reasonAr}"
+                    }
                     actionLogRepository.logAction(
                         title = "رفض خطة صوتية غير مطابقة للسياسة",
-                        details = "$transcript | السبب: ${planPolicy.reasonAr}",
+                        details = logDetails,
                         status = ActionStatus.CANCELLED,
                         actionType = "POLICY_REJECTED_PLAN"
                     )
@@ -807,9 +833,14 @@ class CommandsViewModel(
                 val initialPolicy = agentPolicy.evaluateCommand(command, appLabels)
                 if (!initialPolicy.allowed) {
                     val reason = initialPolicy.reasonAr
+                    val logDetails = if (privacyPreferences.isPrivacyModeEnabled()) {
+                        "السبب: $reason"
+                    } else {
+                        "${com.example.security.SensitiveDataScrubber.scrub(command)} | السبب: $reason"
+                    }
                     actionLogRepository.logAction(
                         title = "رفض أمر وفق سياسة الوكيل",
-                        details = "$command | السبب: $reason",
+                        details = logDetails,
                         status = ActionStatus.CANCELLED,
                         actionType = "POLICY_REJECTED"
                     )
@@ -831,9 +862,14 @@ class CommandsViewModel(
                     is ChatRouteIntent.ExecuteCommandPlan -> {
                         val commandPolicy = agentPolicy.evaluateCommand(command, appLabels)
                         if (!commandPolicy.allowed) {
+                            val logDetails = if (privacyPreferences.isPrivacyModeEnabled()) {
+                                "السبب: ${commandPolicy.reasonAr}"
+                            } else {
+                                "${com.example.security.SensitiveDataScrubber.scrub(command)} | السبب: ${commandPolicy.reasonAr}"
+                            }
                             actionLogRepository.logAction(
                                 title = "رفض أمر وفق سياسة الوكيل",
-                                details = "$command | السبب: ${commandPolicy.reasonAr}",
+                                details = logDetails,
                                 status = ActionStatus.CANCELLED,
                                 actionType = "POLICY_REJECTED"
                             )
@@ -862,9 +898,14 @@ class CommandsViewModel(
                             nextStepAr = "عرض الخطوات المرقّمة ومراجعة أي إجراء حساس",
                             waitingAr = "انتظار استجابة النموذج (يمكنك الإيقاف في أي لحظة)"
                         )
-                        val rawScreenSummary = ScreenStateBridge.getService()?.captureCurrentScreen()
-                            ?.toCompactPromptText()
-                            ?: "داخل تطبيق وكيل الهاتف (خدمة إمكانية الوصول غير مفعلة حالياً)"
+                        val rawScreenSummary = if (privacyPreferences.isPrivacyModeEnabled()) {
+                            ScreenStateBridge.getService()?.captureCurrentScreen()?.toMinimalPrivacyPromptText()
+                                ?: "سياق مقتضب (وضع الخصوصية مفعّل)"
+                        } else {
+                            ScreenStateBridge.getService()?.captureCurrentScreen()
+                                ?.toCompactPromptText()
+                                ?: "داخل تطبيق وكيل الهاتف (خدمة إمكانية الوصول غير مفعلة حالياً)"
+                        }
 
                         val planMeta = geminiRepository.generateCommandPlanWithMeta(
                             userCommand = command,
@@ -880,9 +921,14 @@ class CommandsViewModel(
 
                         val planPolicy = agentPolicy.validatePlan(rawPlan)
                         if (!planPolicy.allowed) {
+                            val logDetails = if (privacyPreferences.isPrivacyModeEnabled()) {
+                                "السبب: ${planPolicy.reasonAr}"
+                            } else {
+                                "${com.example.security.SensitiveDataScrubber.scrub(command)} | السبب: ${planPolicy.reasonAr}"
+                            }
                             actionLogRepository.logAction(
                                 title = "رفض خطة Gemini وفق سياسة الوكيل",
-                                details = "$command | السبب: ${planPolicy.reasonAr}",
+                                details = logDetails,
                                 status = ActionStatus.CANCELLED,
                                 actionType = "POLICY_REJECTED_PLAN"
                             )
@@ -1420,18 +1466,33 @@ class CommandsViewModel(
         val appLabel = installedApps.firstOrNull { it.packageName == snapshot.packageName }?.label
             ?: snapshot.packageName.ifBlank { "الشاشة الحالية" }
 
-        val factualElements = buildString {
-            appendLine("التطبيق الظاهر: $appLabel (${snapshot.packageName})")
-            if (snapshot.visibleTexts.isNotEmpty()) {
-                appendLine("النصوص المرصودة: ${snapshot.visibleTexts.take(18).joinToString(" | ")}")
-            }
-            if (snapshot.clickableLabels.isNotEmpty()) {
-                appendLine("الأزرار والعناصر التفاعلية: ${snapshot.clickableLabels.take(12).joinToString(" | ")}")
-            }
-            if (snapshot.editableHints.isNotEmpty()) {
-                appendLine("حقول الإدخال: ${snapshot.editableHints.take(6).joinToString(" | ")}")
-            }
-        }.trim()
+        val isPrivacyOn = privacyPreferences.isPrivacyModeEnabled()
+        val factualElements = if (isPrivacyOn) {
+            val scrubbedButtons = snapshot.clickableLabels.take(6)
+                .map { com.example.security.SensitiveDataScrubber.scrub(it) }
+                .filter { it.isNotBlank() }
+                .joinToString(" | ")
+            buildString {
+                appendLine("التطبيق الظاهر: $appLabel (${snapshot.packageName})")
+                appendLine("عناصر تفاعلية مقتضبة (وضع الخصوصية مفعّل): ${scrubbedButtons.ifBlank { "لا توجد أزرار ظاهرة" }}")
+            }.trim()
+        } else {
+            buildString {
+                appendLine("التطبيق الظاهر: $appLabel (${snapshot.packageName})")
+                if (snapshot.visibleTexts.isNotEmpty()) {
+                    val scrubbed = snapshot.visibleTexts.take(18).map { com.example.security.SensitiveDataScrubber.scrub(it) }
+                    appendLine("النصوص المرصودة: ${scrubbed.joinToString(" | ")}")
+                }
+                if (snapshot.clickableLabels.isNotEmpty()) {
+                    val scrubbed = snapshot.clickableLabels.take(12).map { com.example.security.SensitiveDataScrubber.scrub(it) }
+                    appendLine("الأزرار والعناصر التفاعلية: ${scrubbed.joinToString(" | ")}")
+                }
+                if (snapshot.editableHints.isNotEmpty()) {
+                    val scrubbed = snapshot.editableHints.take(6).map { com.example.security.SensitiveDataScrubber.scrub(it) }
+                    appendLine("حقول الإدخال: ${scrubbed.joinToString(" | ")}")
+                }
+            }.trim()
+        }
 
         val groundedReply = try {
             startGeminiProgressTimer(
@@ -1439,10 +1500,15 @@ class CommandsViewModel(
                 nextStepAr = "عرض ملخص العناصر الفعلية في الدردشة",
                 waitingAr = "انتظار استجابة النموذج"
             )
+            val capturedLines = if (isPrivacyOn) {
+                listOf(snapshot.toMinimalPrivacyPromptText())
+            } else {
+                AgentPromptRules.enrichScreenReadLines(snapshot.toCompactPromptText())
+            }
             val explainMeta = geminiRepository.summarizeAppScreensWithMeta(
                 appName = appLabel,
                 packageName = snapshot.packageName,
-                capturedScreenTexts = AgentPromptRules.enrichScreenReadLines(snapshot.toCompactPromptText()),
+                capturedScreenTexts = capturedLines,
                 onStatusUpdate = { statusMsg ->
                     _state.update { it.copy(statusNoticeAr = statusMsg, liveDoingNowAr = statusMsg) }
                 }
@@ -1732,7 +1798,7 @@ class CommandsViewModel(
         val traceText = "آخر استجابة: ${meta.modelUsed} • ${meta.tier.labelAr}$fallbackNote"
         Log.i(
             TAG,
-            "ModelTrace: tier=${meta.tier.name}, intended=${meta.intendedModel}, actual=${meta.modelUsed}, fallback=${meta.usedFallback}, preview=${requestPreview.take(40)}"
+            "ModelTrace: tier=${meta.tier.name}, intended=${meta.intendedModel}, actual=${meta.modelUsed}, fallback=${meta.usedFallback}"
         )
         _state.update { it.copy(lastModelTraceAr = traceText) }
     }
@@ -2350,9 +2416,15 @@ class CommandsViewModel(
                 }
                 if (observation == null || observation.isNearEmptyTree()) {
                     val emptyTreeMsg = "لا أرى أزرار اللعبة — صف لي مكان الزر"
+                    val scrubbedCmd = com.example.security.SensitiveDataScrubber.scrub(command)
+                    val detailsMsg = if (privacyPreferences.isPrivacyModeEnabled()) {
+                        emptyTreeMsg
+                    } else {
+                        "$scrubbedCmd | $emptyTreeMsg"
+                    }
                     actionLogRepository.logAction(
                         title = "شاشة غير مقروءة في شريط الدردشة",
-                        details = "$command | $emptyTreeMsg",
+                        details = detailsMsg,
                         status = ActionStatus.FAILED,
                         actionType = "MINI_CHAT_NEAR_EMPTY_TREE"
                     )
@@ -2392,9 +2464,15 @@ class CommandsViewModel(
                             "تعذّر الضغط على «$targetLabel» — هل ترى الزر على الشاشة؟"
                         }
                         if (!gateOutcome.blockedByGate) {
+                            val scrubbedCmd = com.example.security.SensitiveDataScrubber.scrub(command)
+                            val detailsMsg = if (privacyPreferences.isPrivacyModeEnabled()) {
+                                failMsg
+                            } else {
+                                "$scrubbedCmd | $failMsg"
+                            }
                             actionLogRepository.logAction(
                                 title = "تعذّر تنفيذ الضغط من الدردشة",
-                                details = "$command | $failMsg",
+                                details = detailsMsg,
                                 status = ActionStatus.FAILED,
                                 actionType = "MINI_CHAT_ACTION_FAILED"
                             )
@@ -2439,9 +2517,15 @@ class CommandsViewModel(
                 }
                 val isParseFailure = !directive.shouldAct && replyLine == "لم أستطع تنفيذ الضغط"
                 if (isParseFailure) {
+                    val scrubbedCmd = com.example.security.SensitiveDataScrubber.scrub(command)
+                    val detailsMsg = if (privacyPreferences.isPrivacyModeEnabled()) {
+                        replyLine
+                    } else {
+                        "$scrubbedCmd | $replyLine"
+                    }
                     actionLogRepository.logAction(
                         title = "تعذّر فهم توجيه الدردشة",
-                        details = "$command | $replyLine",
+                        details = detailsMsg,
                         status = ActionStatus.FAILED,
                         actionType = "MINI_CHAT_NON_JSON_REPLY"
                     )
@@ -2927,7 +3011,8 @@ class CommandsViewModel(
             context = appContext,
             actionLogRepository = actionLogRepository,
             agentPolicy = agentPolicy
-        )
+        ),
+        private val privacyPreferences: com.example.security.PrivacyPreferences = com.example.security.PrivacyPreferences(appContext)
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -2945,7 +3030,8 @@ class CommandsViewModel(
                 appContext = appContext,
                 agentPolicy = agentPolicy,
                 sensitiveActionGate = sensitiveActionGate,
-                phoneFileManager = phoneFileManager
+                phoneFileManager = phoneFileManager,
+                privacyPreferences = privacyPreferences
             ) as T
         }
     }

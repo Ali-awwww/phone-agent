@@ -34,6 +34,9 @@ object ScreenStateBridge {
 
     fun setTaskActive(active: Boolean) {
         taskActive = active
+        if (!active) {
+            clearSnapshot()
+        }
     }
 
     fun setScreenReadActive(active: Boolean) {
@@ -42,8 +45,21 @@ object ScreenStateBridge {
 
     fun isOperationActive(): Boolean = taskActive || screenReadActive
 
+    fun clearSnapshot() {
+        _latestSnapshot.value = null
+    }
+
     fun updateSnapshot(snapshot: ScreenSnapshot) {
-        _latestSnapshot.value = snapshot
+        if (snapshot.hasSensitiveSecurityField) {
+            _latestSnapshot.value = snapshot.copy(
+                visibleTexts = emptyList(),
+                clickableLabels = emptyList(),
+                editableHints = emptyList(),
+                hasSensitiveSecurityField = true
+            )
+        } else {
+            _latestSnapshot.value = snapshot
+        }
     }
 
     fun getService(): PhoneAgentAccessibilityService? = serviceRef?.get()

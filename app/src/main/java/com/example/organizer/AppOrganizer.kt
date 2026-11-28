@@ -52,7 +52,8 @@ class AppOrganizer(
     private val context: Context,
     private val appOrganizationDao: AppOrganizationDao,
     private val actionLogRepository: ActionLogRepository,
-    private val geminiRepository: GeminiRepository
+    private val geminiRepository: GeminiRepository,
+    private val privacyPreferences: com.example.security.PrivacyPreferences? = null
 ) {
     companion object {
         private val iconCache = LruCache<String, ImageBitmap>(256)
@@ -341,16 +342,18 @@ class AppOrganizer(
 
             onProgress?.invoke("جارٍ قراءة الشاشة…")
             val capturedScreens = mutableListOf<String>()
+            val isPrivacyOn = privacyPreferences?.isPrivacyModeEnabled() == true
             service.captureCurrentScreen()?.let { snap ->
                 if (!snap.hasSensitiveSecurityField) {
-                    capturedScreens.add(snap.toCompactPromptText())
+                    val text = if (isPrivacyOn) snap.toMinimalPrivacyPromptText() else snap.toCompactPromptText()
+                    capturedScreens.add(com.example.security.SensitiveDataScrubber.scrub(text))
                 }
             }
-            if (service.scrollForward()) {
+            if (!isPrivacyOn && service.scrollForward()) {
                 delay(1000L)
                 service.captureCurrentScreen()?.let { snap ->
                     if (!snap.hasSensitiveSecurityField) {
-                        capturedScreens.add(snap.toCompactPromptText())
+                        capturedScreens.add(com.example.security.SensitiveDataScrubber.scrub(snap.toCompactPromptText()))
                     }
                 }
             }

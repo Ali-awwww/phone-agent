@@ -397,13 +397,16 @@ class GeminiRepository internal constructor(
     private val retryDelayMs: Long = DEFAULT_APP_CHECK_RETRY_DELAY_MS,
     private val overloadRetryDelaysMs: List<Long> = DEFAULT_OVERLOAD_BACKOFF_MS,
     private val delayFn: suspend (Long) -> Unit = { delay(it) },
-    private val totalChainTimeoutMs: Long = TOTAL_GEMINI_COMMAND_TIMEOUT_MS
+    private val totalChainTimeoutMs: Long = TOTAL_GEMINI_COMMAND_TIMEOUT_MS,
+    private val privacyPreferences: com.example.security.PrivacyPreferences? = null
 ) {
     constructor(
-        appCheckClient: AppCheckTokenClient = FirebaseAppCheckClient()
+        appCheckClient: AppCheckTokenClient = FirebaseAppCheckClient(),
+        privacyPreferences: com.example.security.PrivacyPreferences? = null
     ) : this(
         appCheckClient = appCheckClient,
-        modelClient = FirebaseGeminiModelClient()
+        modelClient = FirebaseGeminiModelClient(),
+        privacyPreferences = privacyPreferences
     )
 
     /**
@@ -604,10 +607,20 @@ class GeminiRepository internal constructor(
         onStatusUpdate: (suspend (String) -> Unit)? = null
     ): ModelResponseMetadata<AgentPlan> {
         try {
+            val isPrivacyOn = privacyPreferences?.isPrivacyModeEnabled() == true
+            val scrubbedCmd = com.example.security.SensitiveDataScrubber.scrub(userCommand)
+            val scrubbedApps = installedAppNames.map { com.example.security.SensitiveDataScrubber.scrub(it) }
+            val effectiveScreenSummary = if (isPrivacyOn) {
+                com.example.security.SensitiveDataScrubber.minimizeScreenContextForPrivacyMode(currentScreenSummary)
+            } else {
+                com.example.security.SensitiveDataScrubber.scrub(currentScreenSummary)
+            }
+
             val prompt = buildString {
-                appendLine("طلب المستخدم: $userCommand")
-                appendLine("أمثلة التطبيقات المثبتة على الجهاز: ${installedAppNames.take(50).joinToString("، ")}")
-                appendLine("حالة الشاشة الحالية: $currentScreenSummary")
+                appendLine(com.example.executor.ToolRegistry.getRegistryPromptDescription())
+                appendLine("طلب المستخدم: $scrubbedCmd")
+                appendLine("أمثلة التطبيقات المثبتة على الجهاز: ${scrubbedApps.take(50).joinToString("، ")}")
+                appendLine("حالة الشاشة الحالية: $effectiveScreenSummary")
                 appendLine("أنشئ خطة تنفيذ دقيقة خطوة بخطوة بصيغة JSON حسب المخطط المطلوب.")
             }
 
@@ -664,9 +677,10 @@ class GeminiRepository internal constructor(
         onStatusUpdate: (suspend (String) -> Unit)? = null
     ): ModelResponseMetadata<Pair<String, AgentPlan>> {
         try {
+            val scrubbedApps = installedAppNames.map { com.example.security.SensitiveDataScrubber.scrub(it) }
             val prompt = buildString {
                 appendLine("استمع إلى التسجيل الصوتي للمستخدم باللغة العربية، اكتب النص المفهوم في transcriptAr، ثم أنشئ خطة الخطوات التنفيذية.")
-                appendLine("التطبيقات المتاحة: ${installedAppNames.take(40).joinToString("، ")}")
+                appendLine("التطبيقات المتاحة: ${scrubbedApps.take(40).joinToString("، ")}")
             }
             val chain = getModelChainForTier(ModelRouteTier.FLASH)
             val result = withModelChainResilience(
@@ -679,7 +693,8 @@ class GeminiRepository internal constructor(
                 )
             )
             val json = JSONObject(result.value)
-            val transcript = json.optString("transcriptAr", "").ifBlank { "أمر صوتي" }
+            val rawTranscript = json.optString("transcriptAr", "").ifBlank { "أمر صوتي" }
+            val transcript = com.example.security.SensitiveDataScrubber.scrub(rawTranscript)
             val plan = parsePlanJson(transcript, json)
             safeLogI(
                 TAG,
@@ -728,16 +743,22 @@ class GeminiRepository internal constructor(
                 StepActionType.SEND_MESSAGE,
                 StepActionType.CHANGE_SETTING
             )
-            val prompt = buildString {
-                appendLine("الخطوة المنفذة: ${step.titleAr} (${step.descriptionAr})")
-                appendLine("نوع الإجراء: ${step.actionType.name}")
-                appendLine("التحقق المتوقع: ${step.expectedScreenHint}")
-                if (isUiLaunchStep) {
-                    appendLine("تنبيه حاسم: مجرد فتح واجهة المنبه أو الرسالة أو الإعدادات لا يعني إتمام الضبط أو الإرسال؛ أعد verified=true فقط إذا ظهر تأكيد حفظ أو إتمام فعلي على الشاشة، وإلا أعد verified=false.")
-                }
-                appendLine("محتوى الشاشة المرصود الآن:")
-                appendLine(snapshot.toCompactPromptText())
+        val isPrivacyOn = privacyPreferences?.isPrivacyModeEnabled() == true
+        val screenText = if (isPrivacyOn) {
+            snapshot.toMinimalPrivacyPromptText()
+        } else {
+            snapshot.toCompactPromptText()
+        }
+        val prompt = buildString {
+            appendLine("الخطوة المنفذة: ${com.example.security.SensitiveDataScrubber.scrub(step.titleAr)} (${com.example.security.SensitiveDataScrubber.scrub(step.descriptionAr)})")
+            appendLine("نوع الإجراء: ${step.actionType.name}")
+            appendLine("التحقق المتوقع: ${com.example.security.SensitiveDataScrubber.scrub(step.expectedScreenHint)}")
+            if (isUiLaunchStep) {
+                appendLine("تنبيه حاسم: مجرد فتح واجهة المنبه أو الرسالة أو الإعدادات لا يعني إتمام الضبط أو الإرسال؛ أعد verified=true فقط إذا ظهر تأكيد حفظ أو إتمام فعلي على الشاشة، وإلا أعد verified=false.")
             }
+            appendLine("محتوى الشاشة المرصود الآن:")
+            appendLine(screenText)
+        }
             val chain = getModelChainForTier(ModelRouteTier.FLASH)
             val result = withModelChainResilience(
                 timeoutMs = totalChainTimeoutMs,
@@ -853,14 +874,20 @@ class GeminiRepository internal constructor(
         onStatusUpdate: (suspend (String) -> Unit)? = null
     ): ModelResponseMetadata<String> {
         try {
-            val joined = capturedScreenTexts.joinToString("\n---\n")
+            val isPrivacyOn = privacyPreferences?.isPrivacyModeEnabled() == true
+            val effectiveScreens = if (isPrivacyOn) {
+                capturedScreenTexts.take(2).map { com.example.security.SensitiveDataScrubber.minimizeScreenContextForPrivacyMode(it) }
+            } else {
+                capturedScreenTexts.map { com.example.security.SensitiveDataScrubber.scrub(it) }
+            }
+            val joined = effectiveScreens.joinToString("\n---\n")
             val prompt = """
                 قم بتجربة وفحص التطبيق التالي وقدّم ملخصاً عربياً واضحاً ومرتباً للمستخدم يشرح:
                 1. ما وظيفة التطبيق الأساسية؟
                 2. ما الأقسام والميزات الظاهرة في شاشاته؟
                 3. نصيحة سريعة أو ملاحظة أمان إن وجدت.
 
-                اسم التطبيق: $appName
+                اسم التطبيق: ${com.example.security.SensitiveDataScrubber.scrub(appName)}
                 الحزمة: $packageName
                 النصوص المرصودة من شاشات التطبيق:
                 $joined
@@ -903,7 +930,8 @@ class GeminiRepository internal constructor(
         if (apps.isEmpty()) return emptyMap()
         try {
             val formatted = apps.take(80).joinToString("\n") { (pkg, label) ->
-                "- packageName: $pkg | label: $label"
+                val scrubbedLabel = com.example.security.SensitiveDataScrubber.scrub(label)
+                "- packageName: $pkg | label: $scrubbedLabel"
             }
             val prompt = """
                 صنّف كل تطبيق إلى أحد المجلدات التالية فقط:
@@ -971,15 +999,24 @@ class GeminiRepository internal constructor(
         modelTier: ModelRouteTier = ModelRouteTier.LITE
     ): ModelResponseMetadata<String> {
         return try {
+            val isPrivacyOn = privacyPreferences?.isPrivacyModeEnabled() == true
+            val scrubbedMsg = com.example.security.SensitiveDataScrubber.scrub(userMessage)
+            val scrubbedContext = if (isPrivacyOn) {
+                com.example.security.SensitiveDataScrubber.minimizeScreenContextForPrivacyMode(contextSummary)
+            } else {
+                com.example.security.SensitiveDataScrubber.scrub(contextSummary)
+            }
+            val effectiveHistory = if (isPrivacyOn) "" else com.example.security.SensitiveDataScrubber.scrub(history)
+
             val prompt = buildString {
-                if (history.isNotBlank()) {
+                if (effectiveHistory.isNotBlank()) {
                     appendLine("سجل المحادثة السابق:")
-                    appendLine(history)
+                    appendLine(effectiveHistory)
                     appendLine("تعليمات هامة: استخدم سجل المحادثة لحل الضمائر (هو/هي/هذه/ذلك) ولا تبدأ بتحية جديدة إذا كان هناك سجل؛ أجب عن السؤال مباشرة بالرجوع إلى ما سبق.")
                     appendLine()
                 }
-                appendLine("رسالة المستخدم الحالية: $userMessage")
-                appendLine("سياق الحالة الحالية: $contextSummary")
+                appendLine("رسالة المستخدم الحالية: $scrubbedMsg")
+                appendLine("سياق الحالة الحالية: $scrubbedContext")
                 append("أجب برد عربي طبيعي وواضح ومفيد كمساعد ذكي متكامل.")
             }
             val chain = getModelChainForTier(modelTier)
@@ -1041,21 +1078,30 @@ class GeminiRepository internal constructor(
         history: String = "",
         wasGameplayRunning: Boolean = false
     ): ModelResponseMetadata<MiniChatDirectiveResult> {
+        val isPrivacyOn = privacyPreferences?.isPrivacyModeEnabled() == true
+        val scrubbedCmd = com.example.security.SensitiveDataScrubber.scrub(userCommand)
+        val scrubbedScreen = if (isPrivacyOn) {
+            com.example.security.SensitiveDataScrubber.minimizeScreenContextForPrivacyMode(screenSummary)
+        } else {
+            com.example.security.SensitiveDataScrubber.scrub(screenSummary)
+        }
+        val effectiveHistory = if (isPrivacyOn) "" else com.example.security.SensitiveDataScrubber.scrub(history)
+
         val prompt = buildString {
-            if (history.isNotBlank()) {
+            if (effectiveHistory.isNotBlank()) {
                 appendLine("سجل المحادثة السابق:")
-                appendLine(history)
+                appendLine(effectiveHistory)
                 appendLine()
             }
             appendLine("أنت تتحكم حالياً في الشاشة التالية عبر شريط الدردشة المصغّر:")
-            appendLine(screenSummary.ifBlank { "لا توجد تفاصيل شاشة حالياً." })
+            appendLine(scrubbedScreen.ifBlank { "لا توجد تفاصيل شاشة حالياً." })
             appendLine()
             appendLine("قواعد إلزامية:")
             appendLine("1) لا تطلب من المستخدم أبداً أن يضغط أي زر بنفسه ولا تعطه تعليمات يدوية؛ إما أن تنفّذ الإجراء بنفسك (TAP_TEXT أو TAP_XY أو SWIPE أو SCROLL أو INPUT_TEXT أو BACK) أو تُرجع shouldAct=false و action=\"NONE\" وتذكر بوضوح أنك لا ترى الزر على الشاشة.")
             appendLine("2) استخدم إحداثيات x و y فقط من «مواقع العناصر المرصودة» الموجودة في ملخص الشاشة أعلاه، ولا تخمّن إحداثيات غير مرصودة أبداً.")
             appendLine("3) إذا كانت الشاشة شبه فارغة بلا أزرار واضحة، أرجع shouldAct=false و action=\"NONE\" و replyOneLineAr=\"لا أرى أزرار اللعبة — صف لي مكان الزر\".")
             appendLine()
-            appendLine("توجيه المستخدم الفوري: $userCommand")
+            appendLine("توجيه المستخدم الفوري: $scrubbedCmd")
             appendLine("هل كان وضع اللعب التلقائي يعمل؟ $wasGameplayRunning")
             appendLine("أجب بصيغة JSON فقط بدون شرح خارجي:")
             append("""{"shouldAct":true,"action":"TAP_TEXT|TAP_XY|SWIPE|SCROLL|INPUT_TEXT|BACK|NONE","text":"النص الدقيق على الشاشة إن وجد","inputText":"النص المراد كتابته عند INPUT_TEXT","x":0.5,"y":0.5,"endX":0.5,"endY":0.2,"continuePlaying":$wasGameplayRunning,"replyOneLineAr":"رد عربي قصير جداً في سطر واحد"}""")

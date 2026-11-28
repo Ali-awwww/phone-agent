@@ -28,6 +28,15 @@ class VoiceAssistantManager(
 
     init {
         tts = TextToSpeech(context.applicationContext, this)
+        purgeOrphanedVoiceFiles()
+    }
+
+    fun purgeOrphanedVoiceFiles() {
+        runCatching {
+            context.cacheDir.listFiles { f ->
+                f.isFile && f.name.startsWith("voice_cmd_") && f.name.endsWith(".m4a")
+            }?.forEach { it.delete() }
+        }
     }
 
     override fun onInit(status: Int) {
@@ -162,6 +171,7 @@ class VoiceAssistantManager(
 
     private fun startMediaRecorderFallback(onError: (String) -> Unit) {
         try {
+            purgeOrphanedVoiceFiles()
             val outFile = File(context.cacheDir, "voice_cmd_${System.currentTimeMillis()}.m4a")
             recordedFile = outFile
             val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -183,9 +193,12 @@ class VoiceAssistantManager(
             mediaRecorder = recorder
             isRecordingAudioFile = true
         } catch (e: Exception) {
+            recordedFile?.delete()
+            recordedFile = null
             Log.e(TAG, "MediaRecorder start failed", e)
             isRecordingAudioFile = false
-            onError("تعذر بدء تسجيل الصوت: ${e.localizedMessage}")
+            val scrubbedErr = com.example.security.SensitiveDataScrubber.scrubLogMessage(e.localizedMessage)
+            onError("تعذر بدء تسجيل الصوت: $scrubbedErr")
         }
     }
 
@@ -193,15 +206,14 @@ class VoiceAssistantManager(
         onAudioRecordedFallback: (ByteArray, String) -> Unit,
         onError: (String) -> Unit
     ) {
+        val file = recordedFile
         try {
             mediaRecorder?.stop()
             mediaRecorder?.release()
             mediaRecorder = null
             isRecordingAudioFile = false
-            val file = recordedFile
             if (file != null && file.exists() && file.length() > 0) {
                 val bytes = file.readBytes()
-                file.delete()
                 onAudioRecordedFallback(bytes, "audio/mp4")
             } else {
                 onError("التسجيل الصوتي فارغ.")
@@ -211,7 +223,11 @@ class VoiceAssistantManager(
             isRecordingAudioFile = false
             mediaRecorder?.release()
             mediaRecorder = null
-            onError("تعذر إنهاء التسجيل الصوتي: ${e.localizedMessage}")
+            val scrubbedErr = com.example.security.SensitiveDataScrubber.scrubLogMessage(e.localizedMessage)
+            onError("تعذر إنهاء التسجيل الصوتي: $scrubbedErr")
+        } finally {
+            file?.delete()
+            recordedFile = null
         }
     }
 
@@ -223,5 +239,8 @@ class VoiceAssistantManager(
         tts?.stop()
         tts?.shutdown()
         tts = null
+        recordedFile?.delete()
+        recordedFile = null
+        purgeOrphanedVoiceFiles()
     }
 }

@@ -155,7 +155,8 @@ fun PhoneAgentApp(
             appContext = applicationContext,
             agentPolicy = appContainer.agentPolicy,
             sensitiveActionGate = appContainer.sensitiveActionGate,
-            phoneFileManager = appContainer.phoneFileManager
+            phoneFileManager = appContainer.phoneFileManager,
+            privacyPreferences = appContainer.privacyPreferences
         )
     )
     val appsViewModel: AppsViewModel = viewModel(
@@ -169,7 +170,10 @@ fun PhoneAgentApp(
         )
     )
     val permissionsViewModel: PermissionsViewModel = viewModel(
-        factory = PermissionsViewModel.Factory(applicationContext)
+        factory = PermissionsViewModel.Factory(
+            context = applicationContext,
+            privacyPreferences = appContainer.privacyPreferences
+        )
     )
 
     val navBackStackEntry by navController.currentBackStackEntryAsState()

@@ -110,9 +110,12 @@ data class ScreenSnapshot(
 ) {
     fun toCompactPromptText(): String {
         val pkg = packageName.ifBlank { "غير معروف" }
-        val texts = visibleTexts.take(35).joinToString(" | ")
-        val buttons = clickableLabels.take(20).joinToString(" | ")
-        val inputs = editableHints.take(10).joinToString(" | ")
+        val scrubbedTexts = visibleTexts.take(35).map { com.example.security.SensitiveDataScrubber.scrub(it) }
+        val scrubbedButtons = clickableLabels.take(20).map { com.example.security.SensitiveDataScrubber.scrub(it) }
+        val scrubbedInputs = editableHints.take(10).map { com.example.security.SensitiveDataScrubber.scrub(it) }
+        val texts = scrubbedTexts.joinToString(" | ")
+        val buttons = scrubbedButtons.joinToString(" | ")
+        val inputs = scrubbedInputs.joinToString(" | ")
         return buildString {
             appendLine("التطبيق الحالي: $pkg")
             appendLine("النصوص الظاهرة: ${texts.ifBlank { "لا يوجد" }}")
@@ -120,6 +123,21 @@ data class ScreenSnapshot(
             appendLine("حقول الإدخال: ${inputs.ifBlank { "لا يوجد" }}")
             if (hasSensitiveSecurityField) {
                 appendLine("تحذير أمان: توجد حقول كلمة مرور أو بصمة أو دفع على الشاشة.")
+            }
+        }
+    }
+
+    fun toMinimalPrivacyPromptText(): String {
+        val pkg = packageName.ifBlank { "غير معروف" }
+        val buttons = clickableLabels.take(6)
+            .map { com.example.security.SensitiveDataScrubber.scrub(it) }
+            .filter { it.isNotBlank() }
+            .joinToString(" | ")
+        return buildString {
+            appendLine("التطبيق الحالي: $pkg")
+            appendLine("عناصر تفاعلية مقتضبة: ${buttons.ifBlank { "لا يوجد" }}")
+            if (hasSensitiveSecurityField) {
+                appendLine("تحذير أمان: شاشة حساسة.")
             }
         }
     }

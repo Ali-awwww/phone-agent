@@ -44,7 +44,8 @@ class CommandExecutor(
     private val geminiRepository: GeminiRepository,
     private val screenVerifier: ScreenVerifier,
     private val agentPolicy: AgentPolicy = AgentPolicy(),
-    private val sensitiveActionGate: SensitiveActionGate = SensitiveActionGate(agentPolicy)
+    private val sensitiveActionGate: SensitiveActionGate = SensitiveActionGate(agentPolicy),
+    private val privacyPreferences: com.example.security.PrivacyPreferences? = null
 ) {
     fun findMatchingAppPackage(appNameOrPackage: String, installedApps: List<InstalledAppInfo>): InstalledAppInfo? {
         return screenVerifier.matchRealInstalledApp(appNameOrPackage, installedApps)
@@ -409,9 +410,16 @@ class CommandExecutor(
 
         return try {
             context.startActivity(intent)
-            true to "فُتحت واجهة الرسالة بمحتوى «$messageBody» — راجع وأرسل يدوياً."
+            val isPrivacyOn = privacyPreferences?.isPrivacyModeEnabled() == true
+            val bodyDesc = if (isPrivacyOn) {
+                "(محتوى محمي في وضع الخصوصية)"
+            } else {
+                "بمحتوى «${com.example.security.SensitiveDataScrubber.scrub(messageBody)}»"
+            }
+            true to "فُتحت واجهة الرسالة $bodyDesc — راجع وأرسل يدوياً."
         } catch (e: Exception) {
-            false to "تعذر فتح تطبيق المراسلة: ${e.localizedMessage}"
+            val scrubbedErr = com.example.security.SensitiveDataScrubber.scrubLogMessage(e.localizedMessage)
+            false to "تعذر فتح تطبيق المراسلة: $scrubbedErr"
         }
     }
 
@@ -433,7 +441,8 @@ class CommandExecutor(
             context.startActivity(intent)
             true to "فُتحت واجهة الإعدادات المطلوبة — أكمل التعديل والتأكيد."
         } catch (e: Exception) {
-            false to "تعذر فتح الإعدادات: ${e.localizedMessage}"
+            val scrubbedErr = com.example.security.SensitiveDataScrubber.scrubLogMessage(e.localizedMessage)
+            false to "تعذر فتح الإعدادات: $scrubbedErr"
         }
     }
 
@@ -442,8 +451,9 @@ class CommandExecutor(
             ?: return false to ScreenVerifier.MSG_ELEMENT_NOT_FOUND
         val target = step.targetQueryOrText.ifBlank { step.titleAr }
         val clicked = service.findAndClickHumanLike(target)
+        val scrubbedTarget = com.example.security.SensitiveDataScrubber.scrub(target)
         return if (clicked) {
-            true to "تم الضغط على «$target»."
+            true to "تم الضغط على «$scrubbedTarget»."
         } else {
             false to ScreenVerifier.MSG_ELEMENT_NOT_FOUND
         }
@@ -454,8 +464,10 @@ class CommandExecutor(
             ?: return false to ScreenVerifier.MSG_ELEMENT_NOT_FOUND
         val text = step.targetQueryOrText
         val ok = service.findAndInputText(step.targetAppName, text)
+        val isPrivacyOn = privacyPreferences?.isPrivacyModeEnabled() == true
+        val textDesc = if (isPrivacyOn) "نص محمي" else com.example.security.SensitiveDataScrubber.scrub(text)
         return if (ok) {
-            true to "تم كتابة «$text» في الحقل الفعلي."
+            true to "تم كتابة «$textDesc» في الحقل الفعلي."
         } else {
             false to ScreenVerifier.MSG_ELEMENT_NOT_FOUND
         }

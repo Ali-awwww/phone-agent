@@ -10,6 +10,7 @@ import com.example.organizer.AppOrganizer
 import com.example.policy.AgentPolicy
 import com.example.policy.SensitiveActionGate
 import com.example.security.FirebaseAppCheckClient
+import com.example.security.PrivacyPreferences
 import com.example.verifier.ScreenVerifier
 import com.example.voice.VoiceAssistantManager
 import kotlinx.coroutines.CoroutineScope
@@ -22,6 +23,10 @@ class AppContainer(context: Context) {
     private val database by lazy { PhoneAgentDatabase.getInstance(appContext) }
     private val initScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    val privacyPreferences by lazy {
+        PrivacyPreferences(appContext)
+    }
+
     val agentPolicy by lazy {
         AgentPolicy()
     }
@@ -31,12 +36,16 @@ class AppContainer(context: Context) {
     }
 
     val actionLogRepository by lazy {
-        ActionLogRepository(database.actionLogDao())
+        ActionLogRepository(
+            dao = database.actionLogDao(),
+            privacyPreferences = privacyPreferences
+        )
     }
 
     val geminiRepository by lazy {
         GeminiRepository(
-            appCheckClient = FirebaseAppCheckClient(appContext)
+            appCheckClient = FirebaseAppCheckClient(appContext),
+            privacyPreferences = privacyPreferences
         )
     }
 
@@ -54,7 +63,8 @@ class AppContainer(context: Context) {
             geminiRepository = geminiRepository,
             screenVerifier = screenVerifier,
             agentPolicy = agentPolicy,
-            sensitiveActionGate = sensitiveActionGate
+            sensitiveActionGate = sensitiveActionGate,
+            privacyPreferences = privacyPreferences
         )
     }
 
@@ -63,7 +73,8 @@ class AppContainer(context: Context) {
             context = appContext,
             appOrganizationDao = database.appOrganizationDao(),
             actionLogRepository = actionLogRepository,
-            geminiRepository = geminiRepository
+            geminiRepository = geminiRepository,
+            privacyPreferences = privacyPreferences
         )
     }
 

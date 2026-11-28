@@ -57,6 +57,13 @@
     <string name="our_apps_button">تطبيقاتنا</string>
     <string name="our_apps_browser_error">تعذر العثور على متصفح خارجي لفتح الرابط.</string>
 
+    <!-- وضع الخصوصية -->
+    <string name="privacy_mode_title">وضع الخصوصية</string>
+    <string name="privacy_mode_subtitle">إرسال الحد الأدنى من البيانات وحجب نصوص الشاشة الكاملة</string>
+    <string name="privacy_mode_desc">عند تفعيل وضع الخصوصية، يُرسل الوكيل ملخصاً مقتضباً فقط دون نصوص الشاشة الكاملة وبلا سجل محادثة سابق، وتُحجب تفاصيل الإجراءات في السجلات.</string>
+    <string name="privacy_mode_enabled_badge">وضع الخصوصية مفعّل</string>
+    <string name="privacy_mode_disabled_badge">وضع الخصوصية متوقف</string>
+
     <!-- قناة الإشعارات -->
     <string name="notification_channel_reminders_name">تذكيرات وكيل الهاتف</string>
     <string name="notification_channel_reminders_desc">إشعارات التذكيرات والمواعيد التي يضبطها وكيل الهاتف</string>

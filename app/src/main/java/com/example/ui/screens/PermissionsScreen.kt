@@ -41,6 +41,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -217,6 +218,100 @@ fun PermissionsScreen(
                                 fontWeight = FontWeight.Bold
                             )
                         }
+                    }
+                }
+            }
+
+            item {
+                val isPrivacyMode by viewModel.isPrivacyModeEnabled.collectAsStateWithLifecycle()
+                CyberPanelCard(
+                    containerColor = CyberSurfaceNavy,
+                    borderColor = if (isPrivacyMode) StatusSuccess.copy(alpha = 0.7f) else CyberElectricCyan.copy(alpha = 0.45f),
+                    modifier = Modifier.testTag("privacy_mode_card")
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Shield,
+                                    contentDescription = null,
+                                    tint = if (isPrivacyMode) StatusSuccess else CyberElectricCyan,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                                Column {
+                                    Text(
+                                        text = stringResource(R.string.privacy_mode_title),
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = CyberTextPrimary
+                                    )
+                                    Text(
+                                        text = stringResource(R.string.privacy_mode_subtitle),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = CyberTextSecondary
+                                    )
+                                }
+                            }
+
+                            Switch(
+                                checked = isPrivacyMode,
+                                onCheckedChange = { viewModel.setPrivacyMode(it) },
+                                modifier = Modifier.testTag("privacy_mode_switch")
+                            )
+                        }
+
+                        Surface(
+                            shape = androidx.compose.foundation.shape.CircleShape,
+                            color = if (isPrivacyMode) StatusSuccessContainer else StatusPendingContainer,
+                            border = BorderStroke(
+                                0.8.dp,
+                                if (isPrivacyMode) StatusSuccess.copy(alpha = 0.7f) else StatusPending.copy(alpha = 0.7f)
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                if (isPrivacyMode) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.CheckCircle,
+                                        contentDescription = null,
+                                        tint = StatusSuccess,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                                Text(
+                                    text = if (isPrivacyMode) {
+                                        stringResource(R.string.privacy_mode_enabled_badge)
+                                    } else {
+                                        stringResource(R.string.privacy_mode_disabled_badge)
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (isPrivacyMode) StatusSuccess else StatusPending,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = stringResource(R.string.privacy_mode_desc),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = CyberTextSecondary
+                        )
                     }
                 }
             }

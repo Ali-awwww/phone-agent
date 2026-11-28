@@ -31,16 +31,31 @@ data class GameScreenObservation(
             meaningfulElements == 0
     }
 
-    fun toPromptSummary(): String {
+    fun toPromptSummary(privacyMode: Boolean = false): String {
         return buildString {
-            append(snapshot.toCompactPromptText())
-            if (elements.isNotEmpty()) {
-                appendLine("مواقع العناصر المرصودة (نسبية 0.0 إلى 1.0):")
-                elements.take(25).forEach { el ->
-                    val kind = if (el.isClickable) "زر" else "عنصر"
-                    val x = String.format(java.util.Locale.US, "%.2f", el.centerXRatio)
-                    val y = String.format(java.util.Locale.US, "%.2f", el.centerYRatio)
-                    appendLine("- $kind «${el.label}» عند (x=$x, y=$y)")
+            if (privacyMode) {
+                appendLine(snapshot.toMinimalPrivacyPromptText())
+                val clickableElements = elements.filter { it.isClickable && it.label.isNotBlank() && it.label != "عنصر تفاعلي" }.take(8)
+                if (clickableElements.isNotEmpty()) {
+                    appendLine("مواقع أزرار التحكم (نسبية):")
+                    clickableElements.forEach { el ->
+                        val x = String.format(java.util.Locale.US, "%.2f", el.centerXRatio)
+                        val y = String.format(java.util.Locale.US, "%.2f", el.centerYRatio)
+                        val scrubbed = com.example.security.SensitiveDataScrubber.scrub(el.label)
+                        appendLine("- زر «$scrubbed» عند (x=$x, y=$y)")
+                    }
+                }
+            } else {
+                append(snapshot.toCompactPromptText())
+                if (elements.isNotEmpty()) {
+                    appendLine("مواقع العناصر المرصودة (نسبية 0.0 إلى 1.0):")
+                    elements.take(25).forEach { el ->
+                        val kind = if (el.isClickable) "زر" else "عنصر"
+                        val x = String.format(java.util.Locale.US, "%.2f", el.centerXRatio)
+                        val y = String.format(java.util.Locale.US, "%.2f", el.centerYRatio)
+                        val scrubbed = com.example.security.SensitiveDataScrubber.scrub(el.label)
+                        appendLine("- $kind «$scrubbed» عند (x=$x, y=$y)")
+                    }
                 }
             }
         }.trim()
@@ -52,7 +67,9 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
     private val sensitiveKeywords = listOf(
         "كلمة المرور", "كلمة السر", "الرقم السري", "البصمة", "بصمة",
         "الدفع", "بطاقة ائتمان", "رمز التحقق", "pin", "password",
-        "passcode", "fingerprint", "biometric", "payment", "checkout", "cvv"
+        "passcode", "fingerprint", "biometric", "payment", "checkout", "cvv", "cvc",
+        "iban", "credit card", "debit card", "رقم البطاقة", "كود التحقق", "رمز التأكيد",
+        "رقم الهوية", "رقم الحساب", "حساب بنكي", "الرمز السري", "رمز الأمان", "otp"
     )
 
     private var lastEventCaptureMs: Long = 0L
@@ -136,22 +153,28 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
                 hasSensitiveField = true
             }
 
-            if (text.isNotEmpty() && !node.isPassword) {
-                visibleTexts.add(text)
-            } else if (desc.isNotEmpty()) {
-                visibleTexts.add(desc)
+            if (!node.isPassword) {
+                if (text.isNotEmpty()) {
+                    visibleTexts.add(com.example.security.SensitiveDataScrubber.scrub(text))
+                } else if (desc.isNotEmpty()) {
+                    visibleTexts.add(com.example.security.SensitiveDataScrubber.scrub(desc))
+                }
             }
 
-            if (node.isClickable) {
+            if (node.isClickable && !node.isPassword) {
                 val label = text.ifEmpty { desc }
                 if (label.isNotEmpty()) {
-                    clickableLabels.add(label)
+                    clickableLabels.add(com.example.security.SensitiveDataScrubber.scrub(label))
                 }
             }
 
             if (node.isEditable) {
-                val label = hint.ifEmpty { desc.ifEmpty { text.ifEmpty { "حقل نص" } } }
-                editableHints.add(label)
+                if (node.isPassword) {
+                    editableHints.add("حقل كلمة مرور محمي")
+                } else {
+                    val label = hint.ifEmpty { desc.ifEmpty { text.ifEmpty { "حقل نص" } } }
+                    editableHints.add(com.example.security.SensitiveDataScrubber.scrub(label))
+                }
             }
 
             val labelForBound = text.ifEmpty { desc }
@@ -160,7 +183,7 @@ class PhoneAgentAccessibilityService : AccessibilityService() {
                 if (rect.width() > 0 && rect.height() > 0) {
                     val cx = (rect.exactCenterX() / screenW).coerceIn(0.02f, 0.98f)
                     val cy = (rect.exactCenterY() / screenH).coerceIn(0.02f, 0.98f)
-                    val displayLabel = labelForBound.ifEmpty { "عنصر تفاعلي" }
+                    val displayLabel = com.example.security.SensitiveDataScrubber.scrub(labelForBound.ifEmpty { "عنصر تفاعلي" })
                     elementBounds.add(
                         GameElementBound(
                             label = displayLabel,

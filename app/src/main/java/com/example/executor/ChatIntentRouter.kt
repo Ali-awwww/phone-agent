@@ -90,6 +90,17 @@ object ChatIntentRouter {
         rawInput: String,
         knownAppNames: List<String> = emptyList()
     ): ChatRouteIntent {
+        val resolution = ToolRegistry.resolveIntent(rawInput, knownAppNames)
+        if (resolution.toolName == "UNKNOWN") {
+            return ChatRouteIntent.ConversationalChat("عذراً، أداة غير معروفة أو غير مدعومة: ${resolution.errorReason ?: rawInput}")
+        }
+        return resolution.intent
+    }
+
+    fun classifyIntentInternal(
+        rawInput: String,
+        knownAppNames: List<String> = emptyList()
+    ): ChatRouteIntent {
         val raw = rawInput.trim()
         val norm = normalizeDigitsAndArabic(raw).lowercase()
 

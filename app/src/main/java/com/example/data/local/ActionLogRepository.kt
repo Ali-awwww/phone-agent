@@ -1,9 +1,12 @@
 package com.example.data.local
 
+import com.example.security.PrivacyPreferences
+import com.example.security.SensitiveDataScrubber
 import kotlinx.coroutines.flow.Flow
 
 class ActionLogRepository(
-    private val dao: ActionLogDao
+    private val dao: ActionLogDao,
+    private val privacyPreferences: PrivacyPreferences? = null
 ) {
     val allLogs: Flow<List<ActionLogEntity>> = dao.observeAllLogs()
 
@@ -24,15 +27,24 @@ class ActionLogRepository(
         canUndo: Boolean = false,
         undoPayload: String? = null
     ): Long {
+        val isPrivacyOn = privacyPreferences?.isPrivacyModeEnabled() == true
+        val scrubbedTitle = SensitiveDataScrubber.scrub(title)
+        val finalDetails = if (isPrivacyOn) {
+            "وضع الخصوصية مفعّل — أُخفيت التفاصيل لحماية خصوصيتك."
+        } else {
+            SensitiveDataScrubber.scrub(details)
+        }
+        val scrubbedUndo = undoPayload?.let { SensitiveDataScrubber.scrub(it) }
+
         return dao.insertLog(
             ActionLogEntity(
                 timestamp = System.currentTimeMillis(),
-                title = title,
-                details = details,
+                title = scrubbedTitle,
+                details = finalDetails,
                 status = status.name,
                 actionType = actionType,
                 canUndo = canUndo,
-                undoPayload = undoPayload,
+                undoPayload = scrubbedUndo,
                 isUndone = false
             )
         )

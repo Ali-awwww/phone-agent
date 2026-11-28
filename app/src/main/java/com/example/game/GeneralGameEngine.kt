@@ -66,7 +66,8 @@ class GeneralGameEngine(
     private val agentPolicy: AgentPolicy = AgentPolicy(),
     private val executionController: AgentExecutionController = AgentExecutionController(),
     private val floatingControlManager: AgentFloatingControlManager = AgentFloatingControlManager(context),
-    private val sensitiveActionGate: SensitiveActionGate = SensitiveActionGate(agentPolicy)
+    private val sensitiveActionGate: SensitiveActionGate = SensitiveActionGate(agentPolicy),
+    private val privacyPreferences: com.example.security.PrivacyPreferences? = null
 ) {
 
     @Volatile
@@ -218,10 +219,11 @@ class GeneralGameEngine(
                     isPaused = executionController.isPaused.value
                 )
 
-                val prompt = buildGameObservationPrompt(goalAr, observation, recentActions, cycle)
+                val isPrivacyOn = privacyPreferences?.isPrivacyModeEnabled() == true
+                val prompt = buildGameObservationPrompt(goalAr, observation, recentActions, cycle, isPrivacyOn)
                 val rawDecision = geminiRepository.conversationalReply(
                     userMessage = prompt,
-                    contextSummary = AgentPromptRules.enrichGameContextSummary(observation.toPromptSummary()),
+                    contextSummary = AgentPromptRules.enrichGameContextSummary(observation.toPromptSummary(isPrivacyOn)),
                     modelTier = ModelRouteTier.FLASH
                 )
                 val decision = ChatIntentRouter.parseGameActionDecision(rawDecision)
@@ -471,19 +473,22 @@ class GeneralGameEngine(
         goalAr: String,
         observation: GameScreenObservation,
         recentActions: List<String>,
-        cycle: Int
+        cycle: Int,
+        privacyMode: Boolean = false
     ): String {
-        val historyText = if (recentActions.isEmpty()) "لا يوجد" else recentActions.joinToString(" -> ")
+        val scrubbedGoal = com.example.security.SensitiveDataScrubber.scrub(goalAr)
+        val scrubbedActions = recentActions.map { com.example.security.SensitiveDataScrubber.scrub(it) }
+        val historyText = if (scrubbedActions.isEmpty()) "لا يوجد" else scrubbedActions.joinToString(" -> ")
         return """
             أنت محرك لعب عام يتصرف كالإنسان داخل أي تطبيق أو لعبة. التزم بقواعد السلوك:
             - تحقق من الشاشة الحقيقية أولاً ولا تخترع أزراراً أو نصوصاً غير موجودة.
             - نفّذ حركة واحدة تشبه تصرف الإنسان في كل دورة، وتوقف فوراً إذا طُلب منك.
             - كن صريحاً وواضحاً: إذا لم تكن متأكداً أو احتارت عليك الشاشة، اختر action="WAIT" واذكر في reasonAr أنك غير متأكد وتحتاج توضيحاً أو بضع ثوانٍ للملاحظة بدل التخمين.
-            هدف المستخدم: $goalAr
+            هدف المستخدم: $scrubbedGoal
             رقم الدورة: $cycle
             آخر الحركات المنفذة: $historyText
             الشاشة الحالية:
-            ${observation.toPromptSummary()}
+            ${observation.toPromptSummary(privacyMode)}
 
             أجب بصيغة JSON فقط بدون شرح إضافي لاختيار حركة واحدة مما يلي:
             {"action":"TAP_TEXT|TAP_XY|SWIPE|SCROLL|BACK|WAIT|DONE","text":"النص الدقيق للزر إن وجد","x":0.5,"y":0.5,"endX":0.5,"endY":0.2,"reasonAr":"شرح عربي قصير وواضح لما تفعله الآن"}
