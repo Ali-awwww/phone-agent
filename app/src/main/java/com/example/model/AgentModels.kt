@@ -102,10 +102,10 @@ data class AgentPlan(
 
 data class ScreenSnapshot(
     val packageName: String,
-    val visibleTexts: List<String>,
-    val clickableLabels: List<String>,
-    val editableHints: List<String>,
-    val hasSensitiveSecurityField: Boolean,
+    val visibleTexts: List<String> = emptyList(),
+    val clickableLabels: List<String> = emptyList(),
+    val editableHints: List<String> = emptyList(),
+    val hasSensitiveSecurityField: Boolean = false,
     val capturedAt: Long = System.currentTimeMillis()
 ) {
     fun toCompactPromptText(): String {

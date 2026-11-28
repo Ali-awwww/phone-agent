@@ -81,5 +81,18 @@ class ToolRegistryTest {
         assertTrue(desc.contains("show_apps"))
         assertTrue(desc.contains("show_action_history"))
         assertTrue(desc.contains("open_settings"))
+        assertTrue(desc.contains("morning_routine"))
+        assertTrue(desc.contains("summarize_day"))
+    }
+
+    @Test
+    fun `resolveIntent maps morning routine and daily summary to registered Phase 6 tools`() {
+        val morning = ToolRegistry.resolveIntent("الروتين الصباحي")
+        assertEquals("morning_routine", morning.toolName)
+        assertEquals(ChatRouteIntent.MorningRoutine, morning.intent)
+
+        val summary = ToolRegistry.resolveIntent("لخّص يومي")
+        assertEquals("summarize_day", summary.toolName)
+        assertEquals(ChatRouteIntent.SummarizeMyDay, summary.intent)
     }
 }

@@ -207,9 +207,13 @@ class AgentPolicy {
         val forbidden = findForbiddenCategory(trimmed)
         if (forbidden != null) {
             if (!(forbidden == ForbiddenCategory.DATA_DELETION && isAllowedFileManagementCleanup(trimmed))) {
+                val plainReason = com.example.data.local.UserMemoryRepository.formatPlainPolicyRejection(
+                    actionType = "POLICY_BLOCKED_${forbidden.name}",
+                    category = forbidden
+                )
                 return PolicyDecision(
                     allowed = false,
-                    reasonAr = "عذراً، لا أستطيع تنفيذ أي إجراء يتعلق بـ«${forbidden.titleAr}» حفاظاً على أمانك وخصوصيتك. $SUGGESTION_AR",
+                    reasonAr = plainReason,
                     violationCategory = forbidden
                 )
             }
@@ -343,9 +347,13 @@ class AgentPolicy {
         val forbidden = findForbiddenCategory(targetText) ?: findForbiddenCategory(combinedText)
         if (forbidden != null) {
             val label = actionTitleAr.ifBlank { targetText.ifBlank { description } }.take(60)
+            val plainReason = com.example.data.local.UserMemoryRepository.formatPlainPolicyRejection(
+                actionType = "POLICY_BLOCKED_${forbidden.name}",
+                category = forbidden
+            )
             return PolicyDecision(
                 allowed = false,
-                reasonAr = "تم إيقاف الإجراء «$label» لأنها تمس إجراءً ممنوعاً (${forbidden.titleAr}). $SUGGESTION_AR",
+                reasonAr = "تم إيقاف الإجراء «$label»:\n$plainReason",
                 violationCategory = forbidden
             )
         }
@@ -359,7 +367,10 @@ class AgentPolicy {
                 ) {
                     return PolicyDecision(
                         allowed = false,
-                        reasonAr = "تم إيقاف الإجراء لأن تغيير إعدادات القفل ممنوع وفق سياسة الوكيل. $SUGGESTION_AR",
+                        reasonAr = com.example.data.local.UserMemoryRepository.formatPlainPolicyRejection(
+                            actionType = "POLICY_BLOCKED_LOCK_SCREEN_BYPASS",
+                            category = ForbiddenCategory.LOCK_SCREEN_BYPASS
+                        ),
                         violationCategory = ForbiddenCategory.LOCK_SCREEN_BYPASS
                     )
                 }
@@ -370,7 +381,10 @@ class AgentPolicy {
                 ) {
                     return PolicyDecision(
                         allowed = false,
-                        reasonAr = "تم إيقاف الإجراء لأن تغيير إعدادات الحسابات والأمان ممنوع وفق سياسة الوكيل. $SUGGESTION_AR",
+                        reasonAr = com.example.data.local.UserMemoryRepository.formatPlainPolicyRejection(
+                            actionType = "POLICY_BLOCKED_ACCOUNT_SETTINGS",
+                            category = ForbiddenCategory.ACCOUNT_SETTINGS
+                        ),
                         violationCategory = ForbiddenCategory.ACCOUNT_SETTINGS
                     )
                 }
@@ -380,7 +394,10 @@ class AgentPolicy {
                 ) {
                     return PolicyDecision(
                         allowed = false,
-                        reasonAr = "تم إيقاف الإجراء لأن إعادة ضبط الجهاز ممنوعة وفق سياسة الوكيل. $SUGGESTION_AR",
+                        reasonAr = com.example.data.local.UserMemoryRepository.formatPlainPolicyRejection(
+                            actionType = "POLICY_BLOCKED_DATA_DELETION",
+                            category = ForbiddenCategory.DATA_DELETION
+                        ),
                         violationCategory = ForbiddenCategory.DATA_DELETION
                     )
                 }
@@ -394,7 +411,10 @@ class AgentPolicy {
                 ) {
                     return PolicyDecision(
                         allowed = false,
-                        reasonAr = "تم إيقاف الإجراء لأن إدخال كلمات المرور أو رموز التحقق ممنوع وفق سياسة الوكيل. $SUGGESTION_AR",
+                        reasonAr = com.example.data.local.UserMemoryRepository.formatPlainPolicyRejection(
+                            actionType = "POLICY_BLOCKED_PASSWORDS",
+                            category = ForbiddenCategory.PASSWORDS
+                        ),
                         violationCategory = ForbiddenCategory.PASSWORDS
                     )
                 }
@@ -425,7 +445,10 @@ class AgentPolicy {
         if (commandCheck != null) {
             return PolicyDecision(
                 allowed = false,
-                reasonAr = "رُفضت الخطة لأنها تتضمن أمراً ممنوعاً (${commandCheck.titleAr}). $SUGGESTION_AR",
+                reasonAr = com.example.data.local.UserMemoryRepository.formatPlainPolicyRejection(
+                    actionType = "POLICY_BLOCKED_${commandCheck.name}",
+                    category = commandCheck
+                ),
                 violationCategory = commandCheck
             )
         }
@@ -436,7 +459,10 @@ class AgentPolicy {
         if (summaryCheck != null) {
             return PolicyDecision(
                 allowed = false,
-                reasonAr = "رُفضت الخطة لأنها تحتوي على إجراء ممنوع (${summaryCheck.titleAr}). $SUGGESTION_AR",
+                reasonAr = com.example.data.local.UserMemoryRepository.formatPlainPolicyRejection(
+                    actionType = "POLICY_BLOCKED_${summaryCheck.name}",
+                    category = summaryCheck
+                ),
                 violationCategory = summaryCheck
             )
         }

@@ -208,9 +208,94 @@ data class HabitLogEntity(
 
 @Dao
 interface HabitLogDao {
-    @Query("SELECT * FROM habit_logs ORDER BY frequencyCount DESC")
+    @Query("SELECT * FROM habit_logs ORDER BY frequencyCount DESC, lastTimestamp DESC")
     suspend fun getAllHabits(): List<HabitLogEntity>
+
+    @Query("SELECT * FROM habit_logs ORDER BY frequencyCount DESC, lastTimestamp DESC")
+    fun observeAllHabits(): Flow<List<HabitLogEntity>>
+
+    @Query("SELECT * FROM habit_logs WHERE actionName = :actionName AND hourOfDay = :hourOfDay AND dayOfWeek = :dayOfWeek LIMIT 1")
+    suspend fun findHabitSlot(actionName: String, hourOfDay: Int, dayOfWeek: Int): HabitLogEntity?
+
+    @Query("UPDATE habit_logs SET frequencyCount = frequencyCount + :delta, lastTimestamp = :lastTimestamp WHERE id = :id")
+    suspend fun incrementHabitFrequency(id: Long, delta: Int = 1, lastTimestamp: Long = System.currentTimeMillis())
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertHabit(habit: HabitLogEntity): Long
+
+    @Query("DELETE FROM habit_logs")
+    suspend fun clearAllHabits()
 }
+
+@Entity(tableName = "conversation_summaries")
+data class ConversationSummaryEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+    val summaryText: String,
+    val turnsCount: Int,
+    val summaryType: String = "TRUNCATION",
+    val fromTimestamp: Long = System.currentTimeMillis(),
+    val toTimestamp: Long = System.currentTimeMillis(),
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+@Dao
+interface ConversationSummaryDao {
+    @Query("SELECT * FROM conversation_summaries ORDER BY createdAt DESC, id DESC")
+    fun observeAllSummaries(): Flow<List<ConversationSummaryEntity>>
+
+    @Query("SELECT * FROM conversation_summaries ORDER BY createdAt DESC, id DESC LIMIT :limit")
+    suspend fun getRecentSummaries(limit: Int = 5): List<ConversationSummaryEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSummary(summary: ConversationSummaryEntity): Long
+
+    @Query("DELETE FROM conversation_summaries")
+    suspend fun clearAllSummaries()
+}
+
+enum class QueuedCommandStatus {
+    PENDING,
+    RUNNING,
+    COMPLETED,
+    FAILED
+}
+
+@Entity(tableName = "queued_commands")
+data class QueuedCommandEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+    val commandText: String,
+    val status: String = QueuedCommandStatus.PENDING.name,
+    val errorMessage: String? = null,
+    val createdAt: Long = System.currentTimeMillis(),
+    val executedAt: Long? = null
+)
+
+@Dao
+interface QueuedCommandDao {
+    @Query("SELECT * FROM queued_commands WHERE status = 'PENDING' ORDER BY createdAt ASC, id ASC")
+    fun observePendingCommands(): Flow<List<QueuedCommandEntity>>
+
+    @Query("SELECT COUNT(*) FROM queued_commands WHERE status = 'PENDING'")
+    fun observePendingCount(): Flow<Int>
+
+    @Query("SELECT * FROM queued_commands WHERE status = 'PENDING' ORDER BY createdAt ASC, id ASC")
+    suspend fun getPendingCommands(): List<QueuedCommandEntity>
+
+    @Query("SELECT * FROM queued_commands ORDER BY createdAt DESC, id DESC LIMIT 30")
+    suspend fun getRecentCommands(): List<QueuedCommandEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun enqueue(command: QueuedCommandEntity): Long
+
+    @Query("UPDATE queued_commands SET status = :status, executedAt = :executedAt, errorMessage = :errorMessage WHERE id = :id")
+    suspend fun updateStatus(id: Long, status: String, executedAt: Long? = null, errorMessage: String? = null)
+
+    @Query("DELETE FROM queued_commands WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
+    @Query("DELETE FROM queued_commands")
+    suspend fun clearAll()
+}
+

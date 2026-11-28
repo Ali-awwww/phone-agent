@@ -35,6 +35,14 @@ class AppContainer(context: Context) {
         SensitiveActionGate(agentPolicy = agentPolicy)
     }
 
+    val networkConnectivityMonitor by lazy {
+        com.example.network.NetworkConnectivityMonitor(appContext)
+    }
+
+    val queuedCommandDao by lazy {
+        database.queuedCommandDao()
+    }
+
     val actionLogRepository by lazy {
         ActionLogRepository(
             dao = database.actionLogDao(),
@@ -45,7 +53,8 @@ class AppContainer(context: Context) {
     val geminiRepository by lazy {
         GeminiRepository(
             appCheckClient = FirebaseAppCheckClient(appContext),
-            privacyPreferences = privacyPreferences
+            privacyPreferences = privacyPreferences,
+            networkTierProvider = { networkConnectivityMonitor.currentTier }
         )
     }
 
@@ -88,6 +97,30 @@ class AppContainer(context: Context) {
 
     val voiceAssistantManager by lazy {
         VoiceAssistantManager(appContext)
+    }
+
+    val memoryAndHabitPreferences by lazy {
+        com.example.security.MemoryAndHabitPreferences(appContext)
+    }
+
+    val userMemoryRepository by lazy {
+        com.example.data.local.UserMemoryRepository(
+            memoryDao = database.userMemoryDao(),
+            habitDao = database.habitLogDao(),
+            summaryDao = database.conversationSummaryDao(),
+            privacyPreferences = privacyPreferences
+        )
+    }
+
+    val habitLearningEngine by lazy {
+        com.example.habits.HabitLearningEngine(
+            appContext = appContext,
+            userMemoryRepository = userMemoryRepository,
+            actionLogDao = database.actionLogDao(),
+            memoryPrefs = memoryAndHabitPreferences,
+            privacyPreferences = privacyPreferences,
+            agentPolicy = agentPolicy
+        )
     }
 
     init {

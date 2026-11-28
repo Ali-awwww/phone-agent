@@ -32,12 +32,12 @@ import org.json.JSONObject
 data class InstalledAppInfo(
     val packageName: String,
     val label: String,
-    val icon: ImageBitmap?,
-    val folder: AppFolder,
-    val isHidden: Boolean,
-    val lastUsedMs: Long,
-    val isUnused: Boolean,
-    val lastSummary: String?
+    val icon: ImageBitmap? = null,
+    val folder: AppFolder = AppFolder.TOOLS,
+    val isHidden: Boolean = false,
+    val lastUsedMs: Long = 0L,
+    val isUnused: Boolean = false,
+    val lastSummary: String? = null
 )
 
 private data class CachedAppPackage(
@@ -77,11 +77,22 @@ class AppOrganizer(
             } else {
                 @Suppress("DEPRECATION")
                 pm.queryIntentActivities(queryIntent, PackageManager.MATCH_ALL).firstOrNull()
-            } ?: return null
+            }
+            if (match?.activityInfo != null) {
+                return Intent.makeMainActivity(ComponentName(match.activityInfo.packageName, match.activityInfo.name))
+                    .apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+            }
 
-            val activityInfo = match.activityInfo ?: return null
-            return Intent.makeMainActivity(ComponentName(activityInfo.packageName, activityInfo.name))
-                .apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+            val mainIntent = Intent(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_LAUNCHER) }
+            val fallbackMatch = pm.queryIntentActivities(mainIntent, 0).firstOrNull {
+                it.activityInfo?.packageName == packageName
+            }
+            if (fallbackMatch?.activityInfo != null) {
+                return Intent.makeMainActivity(ComponentName(fallbackMatch.activityInfo.packageName, fallbackMatch.activityInfo.name))
+                    .apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+            }
+
+            return null
         }
     }
 
@@ -364,14 +375,32 @@ class AppOrganizer(
             }
 
             onProgress?.invoke("جارٍ سؤال النموذج…")
-            val summary = geminiRepository.summarizeAppScreens(
-                appName = app.label,
-                packageName = app.packageName,
-                capturedScreenTexts = capturedScreens,
-                onStatusUpdate = { status ->
-                    onProgress?.invoke("جارٍ كتابة الملخص… ($status)")
+            val summary = if (isPrivacyOn) {
+                com.example.verifier.LocalScreenSummarizer.summarizeFromCapturedTexts(
+                    appName = app.label,
+                    packageName = app.packageName,
+                    capturedScreenTexts = capturedScreens
+                )
+            } else {
+                try {
+                    geminiRepository.summarizeAppScreens(
+                        appName = app.label,
+                        packageName = app.packageName,
+                        capturedScreenTexts = capturedScreens,
+                        onStatusUpdate = { status ->
+                            onProgress?.invoke("جارٍ كتابة الملخص… ($status)")
+                        }
+                    )
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    com.example.verifier.LocalScreenSummarizer.summarizeFromCapturedTexts(
+                        appName = app.label,
+                        packageName = app.packageName,
+                        capturedScreenTexts = capturedScreens
+                    )
                 }
-            )
+            }
 
             onProgress?.invoke("جارٍ كتابة الملخص…")
             val existing = appOrganizationDao.getOrganization(app.packageName)

@@ -156,7 +156,12 @@ fun PhoneAgentApp(
             agentPolicy = appContainer.agentPolicy,
             sensitiveActionGate = appContainer.sensitiveActionGate,
             phoneFileManager = appContainer.phoneFileManager,
-            privacyPreferences = appContainer.privacyPreferences
+            privacyPreferences = appContainer.privacyPreferences,
+            userMemoryRepository = appContainer.userMemoryRepository,
+            memoryAndHabitPreferences = appContainer.memoryAndHabitPreferences,
+            habitLearningEngine = appContainer.habitLearningEngine,
+            networkConnectivityMonitor = appContainer.networkConnectivityMonitor,
+            queuedCommandDao = appContainer.queuedCommandDao
         )
     )
     val appsViewModel: AppsViewModel = viewModel(
@@ -172,7 +177,9 @@ fun PhoneAgentApp(
     val permissionsViewModel: PermissionsViewModel = viewModel(
         factory = PermissionsViewModel.Factory(
             context = applicationContext,
-            privacyPreferences = appContainer.privacyPreferences
+            privacyPreferences = appContainer.privacyPreferences,
+            userMemoryRepository = appContainer.userMemoryRepository,
+            memoryAndHabitPreferences = appContainer.memoryAndHabitPreferences
         )
     )
 

@@ -48,9 +48,14 @@ import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.SignalCellularAlt
 import androidx.compose.material.icons.rounded.SportsEsports
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.Wifi
+import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -89,6 +94,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.BuildConfig
 import com.example.data.local.ChatMessageEntity
 import com.example.data.local.ChatMessageType
+import com.example.network.NetworkTier
 import com.example.permissions.PermissionHelper
 import com.example.policy.AgentPromptRules
 import com.example.ui.components.AppPickerForGameplayDialog
@@ -100,8 +106,11 @@ import com.example.ui.components.CyberPlanCard
 import com.example.ui.components.FileCleanupBatchApprovalDialog
 import com.example.ui.components.FilePermissionExplanationDialog
 import com.example.ui.components.FileTrashDialog
+import com.example.ui.components.MemoryAndHabitsDialog
+import com.example.ui.components.MorningRoutineApprovalDialog
 import com.example.ui.components.PlayFeatureInfoDialog
 import com.example.ui.components.PlayWithAgentPromoCard
+import com.example.ui.components.PredictiveSuggestionCard
 import com.example.ui.components.SensitiveStepApprovalDialog
 import com.example.organizer.InstalledAppInfo
 import com.example.ui.theme.CyberBgDeep
@@ -137,6 +146,8 @@ fun CommandsScreen(
     val messages by viewModel.messages.collectAsStateWithLifecycle()
     val hasOlderMessages by viewModel.hasOlderMessages.collectAsStateWithLifecycle()
     val activeTasks by viewModel.activeTasks.collectAsStateWithLifecycle()
+    val memories by viewModel.memories.collectAsStateWithLifecycle()
+    val habits by viewModel.habits.collectAsStateWithLifecycle()
     val installedAppsByPackage by viewModel.installedAppsByPackage.collectAsStateWithLifecycle()
     val isAccessibilityConnected by viewModel.isAccessibilityConnected.collectAsStateWithLifecycle()
     var showClearChatConfirmDialog by remember { mutableStateOf(false) }
@@ -208,6 +219,8 @@ fun CommandsScreen(
 
     val quickSuggestions = remember {
         listOf(
+            "الروتين الصباحي",
+            "لخّص يومي",
             "اعرض ألعابي",
             "تولّي اللعب",
             "ماذا فعلت؟",
@@ -301,6 +314,18 @@ fun CommandsScreen(
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             IconButton(
+                                onClick = { viewModel.openMemoryHabitsDialog() },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("open_memory_habits_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Psychology,
+                                    contentDescription = "الذاكرة والعادات",
+                                    tint = CyberElectricCyan
+                                )
+                            }
+                            IconButton(
                                 onClick = { viewModel.analyzeAndPlanCommand("العب لعبة") },
                                 modifier = Modifier
                                     .size(48.dp)
@@ -351,7 +376,12 @@ fun CommandsScreen(
                 }
             }
 
-            // 2) بطاقة الخطأ المدمجة (مرة واحدة فقط + زر إعادة المحاولة + التفاصيل مطوية افتراضياً) أو بطاقة اتصال النموذج
+            // 2) مؤشر الاتصال الصادق وطابور الانتظار + بطاقة الخطأ أو حالة النموذج
+            NetworkConnectivityIndicator(
+                networkTier = state.networkTier,
+                queuedCommandsCount = state.queuedCommandsCount
+            )
+
             val activeError = state.activeError
             if (activeError != null) {
                 CompactErrorCard(
@@ -367,6 +397,8 @@ fun CommandsScreen(
             } else {
                 ModelConnectionCard(
                     status = state.modelConnectionStatus,
+                    networkTier = state.networkTier,
+                    queuedCommandsCount = state.queuedCommandsCount,
                     statusNoticeAr = state.statusNoticeAr,
                     lastModelTraceAr = state.lastModelTraceAr,
                     appCheckDebugToken = state.appCheckDebugToken,
@@ -497,6 +529,14 @@ fun CommandsScreen(
                         )
                     }
                 }
+            }
+
+            state.activePredictiveSuggestion?.let { suggestion ->
+                PredictiveSuggestionCard(
+                    suggestion = suggestion,
+                    onPrepareCommand = { viewModel.applyPredictiveSuggestion() },
+                    onDismiss = { viewModel.dismissPredictiveSuggestion() }
+                )
             }
 
             // 5) حاوية كبسولات الأوامر الجاهزة بأسلوب iPhone
@@ -828,6 +868,31 @@ fun CommandsScreen(
             onDismiss = { viewModel.dismissTrashDialog() }
         )
     }
+
+    if (state.pendingMorningRoutineApproval) {
+        MorningRoutineApprovalDialog(
+            onApprove = { viewModel.approveMorningRoutine() },
+            onDismiss = { viewModel.dismissMorningRoutineApproval() }
+        )
+    }
+
+    if (state.showMemoryHabitsDialog) {
+        MemoryAndHabitsDialog(
+            memories = memories,
+            habits = habits,
+            isPrivacyModeEnabled = state.isPrivacyModeEnabled,
+            predictiveLearningEnabled = state.predictiveLearningEnabled,
+            anonymizedHabitGeminiConsent = state.anonymizedHabitGeminiConsent,
+            morningRoutineApproved = state.morningRoutineApproved,
+            onTogglePredictiveLearning = { viewModel.setPredictiveLearningEnabled(it) },
+            onToggleAnonymizedGeminiConsent = { viewModel.setAnonymizedHabitGeminiConsent(it) },
+            onResetMorningRoutineApproval = { viewModel.resetMorningRoutineApproval() },
+            onForgetMemoryFact = { id -> viewModel.forgetMemoryFact(id) },
+            onClearAllMemory = { viewModel.clearAllUserMemory() },
+            onClearAllHabits = { viewModel.clearAllHabits() },
+            onDismiss = { viewModel.dismissMemoryHabitsDialog() }
+        )
+    }
 }
 
 @Composable
@@ -1006,9 +1071,117 @@ private fun CompactErrorCard(
     }
 }
 
+private data class NetworkIndicatorStyle(
+    val bgColor: Color,
+    val borderColor: Color,
+    val contentColor: Color,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val labelText: String
+)
+
+@Composable
+fun NetworkConnectivityIndicator(
+    networkTier: NetworkTier,
+    queuedCommandsCount: Int,
+    modifier: Modifier = Modifier
+) {
+    val style = when (networkTier) {
+        NetworkTier.OFFLINE -> NetworkIndicatorStyle(
+            bgColor = StatusCancelledContainer,
+            borderColor = StatusCancelled.copy(alpha = 0.7f),
+            contentColor = StatusCancelled,
+            icon = Icons.Rounded.WifiOff,
+            labelText = "غير متصل بالشبكة — الأوامر المحلية تعمل فوراً"
+        )
+        NetworkTier.WEAK_E_2G -> NetworkIndicatorStyle(
+            bgColor = StatusPendingContainer,
+            borderColor = StatusPending.copy(alpha = 0.75f),
+            contentColor = StatusPending,
+            icon = Icons.Rounded.SignalCellularAlt,
+            labelText = "اتصال ضعيف (E/2G) — الوضع الخفيف Lite أولاً ومهلة 15ث"
+        )
+        NetworkTier.NORMAL -> NetworkIndicatorStyle(
+            bgColor = CyberSurfaceNavy,
+            borderColor = CyberBorderGlow.copy(alpha = 0.55f),
+            contentColor = StatusSuccess,
+            icon = Icons.Rounded.Wifi,
+            labelText = "الشبكة متصلة"
+        )
+    }
+
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("network_connectivity_indicator"),
+        shape = RoundedCornerShape(12.dp),
+        color = style.bgColor,
+        border = BorderStroke(0.8.dp, style.borderColor)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(
+                    imageVector = style.icon,
+                    contentDescription = style.labelText,
+                    tint = style.contentColor,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    text = style.labelText,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = style.contentColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (queuedCommandsCount > 0) {
+                Spacer(Modifier.width(8.dp))
+                Surface(
+                    modifier = Modifier.testTag("queued_commands_badge"),
+                    shape = CircleShape,
+                    color = CyberSurfaceElevated,
+                    border = BorderStroke(0.8.dp, StatusPending.copy(alpha = 0.75f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Schedule,
+                            contentDescription = "في الطابور",
+                            tint = StatusPending,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Text(
+                            text = "في الطابور: $queuedCommandsCount",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = StatusPending,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun ModelConnectionCard(
     status: ModelConnectionStatus,
+    networkTier: NetworkTier = NetworkTier.NORMAL,
+    queuedCommandsCount: Int = 0,
     statusNoticeAr: String,
     lastModelTraceAr: String,
     appCheckDebugToken: String,
@@ -1066,7 +1239,11 @@ fun ModelConnectionCard(
                             )
                             Column {
                                 Text(
-                                    text = "النموذج متصل (Gemini 3.8 Flash)",
+                                    text = if (networkTier == NetworkTier.WEAK_E_2G) {
+                                        "متصل — وضع E/2G الخفيف (Lite أولاً)"
+                                    } else {
+                                        "النموذج متصل (Gemini 3.8 Flash)"
+                                    },
                                     style = MaterialTheme.typography.labelLarge,
                                     fontWeight = FontWeight.Bold,
                                     color = StatusSuccess,
@@ -1120,7 +1297,11 @@ fun ModelConnectionCard(
                                     overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
-                                    text = "اضغط «التفاصيل» أو أعد الفحص",
+                                    text = if (queuedCommandsCount > 0) {
+                                        "أوامر محفوظة في الطابور: $queuedCommandsCount"
+                                    } else {
+                                        "اضغط «التفاصيل» أو أعد الفحص"
+                                    },
                                     style = MaterialTheme.typography.labelSmall,
                                     color = CyberTextSecondary,
                                     maxLines = 1,
@@ -1137,7 +1318,11 @@ fun ModelConnectionCard(
                                 modifier = Modifier.size(20.dp)
                             )
                             Text(
-                                text = "اتصال النموذج لم يُفحص بعد",
+                                text = if (networkTier == NetworkTier.WEAK_E_2G) {
+                                    "وضع E/2G الخفيف جاهز (Lite أولاً)"
+                                } else {
+                                    "اتصال النموذج لم يُفحص بعد"
+                                },
                                 style = MaterialTheme.typography.labelMedium,
                                 color = CyberTextSecondary,
                                 maxLines = 1,

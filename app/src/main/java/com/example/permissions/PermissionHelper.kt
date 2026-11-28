@@ -131,7 +131,7 @@ object PermissionHelper {
 
     fun isAllFilesAccessGranted(context: Context): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            Environment.isExternalStorageManager()
+            runCatching { Environment.isExternalStorageManager() }.getOrDefault(false)
         } else {
             ContextCompat.checkSelfPermission(
                 context,

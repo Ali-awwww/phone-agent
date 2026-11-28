@@ -58,6 +58,10 @@ class ActionLogRepository(
         dao.markUndone(id, ActionStatus.UNDONE.name)
     }
 
+    suspend fun getLogsSince(sinceTimestamp: Long): List<ActionLogEntity> {
+        return dao.getLogsSince(sinceTimestamp)
+    }
+
     suspend fun clearAll() {
         dao.clearAllLogs()
     }

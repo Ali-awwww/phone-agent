@@ -15,24 +15,85 @@ object ConversationMemory {
         maxCharsPerMessage: Int = 500,
         maxTotalChars: Int = 4000
     ): String {
-        if (turns.isEmpty()) return ""
+        if (turns.isEmpty() || maxTurns <= 0 || maxTotalChars <= 0) return ""
         val recent = turns.takeLast(maxTurns * 2)
-        val sb = StringBuilder()
+        val keptLinesReversed = mutableListOf<String>()
         var totalChars = 0
 
-        for (turn in recent) {
+        // F18: الاقتطاع دائماً من الأقدم — نبدأ من أحدث رسالة ونحتفظ بالأحدث أولاً
+        for (turn in recent.asReversed()) {
             val truncatedText = if (turn.text.length > maxCharsPerMessage) {
                 turn.text.take(maxCharsPerMessage) + "..."
             } else {
                 turn.text
             }
             val prefix = if (turn.role == "user") "المستخدم: " else "المساعد: "
-            val line = "$prefix$truncatedText\n"
-            if (totalChars + line.length > maxTotalChars) break
-            sb.append(line)
-            totalChars += line.length
+            val line = "$prefix$truncatedText"
+            val addedLen = line.length + if (keptLinesReversed.isEmpty()) 0 else 1
+            if (totalChars + addedLen > maxTotalChars) {
+                if (keptLinesReversed.isEmpty() && maxTotalChars > prefix.length + 3) {
+                    val allowedBody = (maxTotalChars - prefix.length - 3).coerceAtLeast(1)
+                    keptLinesReversed.add("$prefix${truncatedText.take(allowedBody)}...")
+                }
+                break
+            }
+            keptLinesReversed.add(line)
+            totalChars += addedLen
         }
-        return sb.toString().trim()
+        return keptLinesReversed.asReversed().joinToString("\n").trim()
+    }
+
+    fun formatHistoryWithSummaries(
+        summaries: List<String>,
+        turns: List<ChatTurn>,
+        maxTurns: Int = 15,
+        maxCharsPerMessage: Int = 500,
+        maxTotalChars: Int = 4500
+    ): String {
+        val summaryBlock = if (summaries.isNotEmpty()) {
+            val joinedSummaries = summaries
+                .filter { it.isNotBlank() }
+                .take(3)
+                .joinToString("\n- ", prefix = "ملخص الحوار السابق المحفوظ:\n- ")
+            joinedSummaries.take(1200)
+        } else {
+            ""
+        }
+        val remainingBudget = (maxTotalChars - summaryBlock.length - 2).coerceAtLeast(600)
+        val recentBlock = formatHistory(
+            turns = turns,
+            maxTurns = maxTurns,
+            maxCharsPerMessage = maxCharsPerMessage,
+            maxTotalChars = remainingBudget
+        )
+        return listOf(summaryBlock, recentBlock)
+            .filter { it.isNotBlank() }
+            .joinToString("\n\n")
+            .trim()
+    }
+
+    fun buildDeterministicTurnSummary(turns: List<ChatTurn>, maxPoints: Int = 4): String {
+        if (turns.isEmpty()) return ""
+        val userTopics = turns
+            .filter { it.role == "user" && it.text.isNotBlank() }
+            .map { it.text.replace('\n', ' ').trim().take(70) }
+            .distinct()
+            .take(maxPoints)
+        val agentHighlights = turns
+            .filter { it.role == "model" && it.text.isNotBlank() }
+            .map { it.text.replace('\n', ' ').trim().take(70) }
+            .distinct()
+            .take(2)
+        return buildString {
+            append("ملخص ${turns.size} رسائل سابقة: ")
+            if (userTopics.isNotEmpty()) {
+                append("موضوعات المستخدم (${userTopics.joinToString("؛ ")})")
+            }
+            if (agentHighlights.isNotEmpty()) {
+                if (userTopics.isNotEmpty()) append(" — ")
+                append("أبرز الردود (${agentHighlights.joinToString("؛ ")})")
+            }
+        }.trim()
     }
 
     fun isInstalledAppQuestion(text: String): Boolean {

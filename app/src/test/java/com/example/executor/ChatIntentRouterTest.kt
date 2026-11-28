@@ -197,4 +197,16 @@ class ChatIntentRouterTest {
         assertTrue(ChatIntentRouter.classifyIntent("العب لعبة") is ChatRouteIntent.StartGameplay)
         assertTrue(ChatIntentRouter.classifyIntent("اعرض تطبيقاتي") is ChatRouteIntent.ShowApps)
     }
+
+    @Test
+    fun `morning routine and summarize my day route to dedicated Phase 6 intents`() {
+        assertEquals(ChatRouteIntent.MorningRoutine, ChatIntentRouter.classifyIntent("الروتين الصباحي"))
+        assertEquals(ChatRouteIntent.MorningRoutine, ChatIntentRouter.classifyIntent("ابدأ روتيني الصباحي"))
+        assertEquals(ModelRouteTier.FLASH, ChatIntentRouter.classifyModelTier("الروتين الصباحي"))
+
+        assertEquals(ChatRouteIntent.SummarizeMyDay, ChatIntentRouter.classifyIntent("لخّص يومي"))
+        assertEquals(ChatRouteIntent.SummarizeMyDay, ChatIntentRouter.classifyIntent("لخص يومي"))
+        assertEquals(ChatRouteIntent.SummarizeMyDay, ChatIntentRouter.classifyIntent("ملخص يومي"))
+        assertEquals(ModelRouteTier.LITE, ChatIntentRouter.classifyModelTier("لخّص يومي"))
+    }
 }

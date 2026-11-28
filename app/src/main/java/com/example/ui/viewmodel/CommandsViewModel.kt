@@ -18,6 +18,15 @@ import com.example.data.local.AgentTaskType
 import com.example.data.local.ChatHistoryRepository
 import com.example.data.local.ChatMessageEntity
 import com.example.data.local.ChatMessageType
+import com.example.data.local.ChatSender
+import com.example.data.local.HabitLogEntity
+import com.example.data.local.PhoneAgentDatabase
+import com.example.data.local.UserMemoryEntity
+import com.example.data.local.UserMemoryRepository
+import com.example.habits.HabitLearningEngine
+import com.example.habits.PredictiveSuggestion
+import com.example.security.MemoryAndHabitPreferences
+import java.util.Calendar
 import com.example.executor.ChatIntentRouter
 import com.example.executor.ChatRouteIntent
 import com.example.executor.CommandExecutor
@@ -68,19 +77,35 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.example.BuildConfig
+import com.example.MainActivity
+import com.example.R
 import com.example.chat.ChatTurn
 import com.example.chat.ConversationMemory
+import com.example.data.local.QueuedCommandDao
+import com.example.data.local.QueuedCommandEntity
+import com.example.data.local.QueuedCommandStatus
 import com.example.executor.ModelRouteTier
 import com.example.game.ForegroundAppPolicy
+import com.example.network.NetworkConnectivityMonitor
+import com.example.network.NetworkTier
+import com.example.organizer.AppMatchResult
+import com.example.organizer.AppNameMatcher
 import com.example.security.DisconnectionCategory
 import com.example.security.classifyModelError
 import com.example.security.getActiveProjectId
 import com.example.security.getEffectiveDebugSecret
+import com.example.verifier.LocalScreenSummarizer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
@@ -89,6 +114,8 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 private const val TAG = "CommandsViewModel"
@@ -168,7 +195,15 @@ data class CommandsScreenState(
     val liveWaitingForUserAr: String = "",
     val isPrivacyModeEnabled: Boolean = false,
     val geminiElapsedSeconds: Int = 0,
-    val geminiTimeoutSeconds: Int = (com.example.data.ai.TOTAL_GEMINI_COMMAND_TIMEOUT_MS / 1000L).toInt()
+    val geminiTimeoutSeconds: Int = (com.example.data.ai.TOTAL_GEMINI_COMMAND_TIMEOUT_MS / 1000L).toInt(),
+    val pendingMorningRoutineApproval: Boolean = false,
+    val activePredictiveSuggestion: PredictiveSuggestion? = null,
+    val showMemoryHabitsDialog: Boolean = false,
+    val predictiveLearningEnabled: Boolean = false,
+    val anonymizedHabitGeminiConsent: Boolean = false,
+    val morningRoutineApproved: Boolean = false,
+    val networkTier: NetworkTier = NetworkTier.NORMAL,
+    val queuedCommandsCount: Int = 0
 ) {
     val isAnyTaskRunning: Boolean
         get() = isBusyWorking || uiState is CommandsUiState.Planning || isExecuting || isGameplayRunning
@@ -197,11 +232,40 @@ class CommandsViewModel(
         actionLogRepository = actionLogRepository,
         agentPolicy = agentPolicy
     ),
-    private val privacyPreferences: com.example.security.PrivacyPreferences = com.example.security.PrivacyPreferences(appContext)
+    private val privacyPreferences: com.example.security.PrivacyPreferences = com.example.security.PrivacyPreferences(appContext),
+    private val userMemoryRepository: UserMemoryRepository = PhoneAgentDatabase.getInstance(appContext).let { db ->
+        UserMemoryRepository(
+            memoryDao = db.userMemoryDao(),
+            habitDao = db.habitLogDao(),
+            summaryDao = db.conversationSummaryDao(),
+            privacyPreferences = privacyPreferences
+        )
+    },
+    private val memoryAndHabitPreferences: MemoryAndHabitPreferences = MemoryAndHabitPreferences(appContext),
+    private val habitLearningEngine: HabitLearningEngine = HabitLearningEngine(
+        appContext = appContext,
+        userMemoryRepository = userMemoryRepository,
+        actionLogDao = PhoneAgentDatabase.getInstance(appContext).actionLogDao(),
+        memoryPrefs = memoryAndHabitPreferences,
+        privacyPreferences = privacyPreferences,
+        agentPolicy = agentPolicy
+    ),
+    private val networkConnectivityMonitor: NetworkConnectivityMonitor = NetworkConnectivityMonitor(appContext),
+    private val queuedCommandDao: QueuedCommandDao = PhoneAgentDatabase.getInstance(appContext).queuedCommandDao()
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(CommandsScreenState())
     val state: StateFlow<CommandsScreenState> = _state.asStateFlow()
+
+    private val queueDrainMutex = Mutex()
+    @Volatile
+    private var previousObservedNetworkTier: NetworkTier = networkConnectivityMonitor.currentTier
+
+    val memories: StateFlow<List<UserMemoryEntity>> = userMemoryRepository.allMemories
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+
+    val habits: StateFlow<List<HabitLogEntity>> = userMemoryRepository.allHabits
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
 
     val isAccessibilityConnected: StateFlow<Boolean> = ScreenStateBridge.isServiceConnected
 
@@ -288,9 +352,82 @@ class CommandsViewModel(
         if (cleanReply.isNotEmpty()) {
             conversationTurns.add(ChatTurn("model", cleanReply))
         }
-        if (conversationTurns.size > 30) {
-            val dropCount = conversationTurns.size - 30
-            repeat(dropCount) { conversationTurns.removeAt(0) }
+        if (cleanUser.isEmpty() && cleanReply.isEmpty()) return
+
+        viewModelScope.launch {
+            processConversationWindowAndMilestones()
+        }
+    }
+
+    internal suspend fun processConversationWindowAndMilestones(
+        turnsToPeriodicThreshold: Int = UserMemoryRepository.PERIODIC_SUMMARY_INTERVAL_TURNS
+    ) {
+        if (privacyPreferences.isPrivacyModeEnabled()) {
+            conversationTurns.clear()
+            return
+        }
+
+        // 1) F18: الاقتطاع دائماً من الأقدم + تلخيص الأدوار القديمة في Room بدل حذفها صامتة
+        if (conversationTurns.size > MAX_ACTIVE_CONVERSATION_TURNS) {
+            val evictCount = (conversationTurns.size - KEEP_AFTER_TRUNCATION_TURNS).coerceAtLeast(2)
+            val evicted = synchronized(conversationTurns) {
+                if (conversationTurns.size > MAX_ACTIVE_CONVERSATION_TURNS) {
+                    val slice = conversationTurns.take(evictCount)
+                    repeat(evictCount) { conversationTurns.removeAt(0) }
+                    slice
+                } else {
+                    emptyList()
+                }
+            }
+            if (evicted.isNotEmpty()) {
+                val evictedText = ConversationMemory.formatHistory(
+                    turns = evicted,
+                    maxTurns = evicted.size,
+                    maxTotalChars = 3000
+                )
+                val summary = runCatching {
+                    geminiRepository.summarizeConversationWithLite(
+                        turnsText = evictedText,
+                        isPeriodicMilestone = false
+                    ).value
+                }.getOrNull()?.takeIf { it.isNotBlank() }
+                    ?: ConversationMemory.buildDeterministicTurnSummary(evicted)
+
+                userMemoryRepository.saveConversationSummary(
+                    summaryText = summary,
+                    turnsCount = evicted.size,
+                    summaryType = UserMemoryRepository.SUMMARY_TYPE_TRUNCATION,
+                    alsoSaveAsMemoryFact = false
+                )
+            }
+        }
+
+        // 2) S2-1: ملخص دوري بالنموذج الخفيف (Lite) كل 20 دور محادثة، يُحفظ ويُحقن كسياق مختصر
+        val turnsSinceSummary = memoryAndHabitPreferences.incrementTurnsSinceLastSummary()
+        if (turnsSinceSummary >= turnsToPeriodicThreshold) {
+            val snapshotTurns = synchronized(conversationTurns) { conversationTurns.toList() }
+            if (snapshotTurns.isNotEmpty()) {
+                val turnsText = ConversationMemory.formatHistory(
+                    turns = snapshotTurns,
+                    maxTurns = 20,
+                    maxTotalChars = 3800
+                )
+                val periodicSummary = runCatching {
+                    geminiRepository.summarizeConversationWithLite(
+                        turnsText = turnsText,
+                        isPeriodicMilestone = true
+                    ).value
+                }.getOrNull()?.takeIf { it.isNotBlank() }
+                    ?: ConversationMemory.buildDeterministicTurnSummary(snapshotTurns)
+
+                userMemoryRepository.saveConversationSummary(
+                    summaryText = periodicSummary,
+                    turnsCount = snapshotTurns.size,
+                    summaryType = UserMemoryRepository.SUMMARY_TYPE_PERIODIC_20,
+                    alsoSaveAsMemoryFact = true
+                )
+                memoryAndHabitPreferences.setTurnsSinceLastSummary(0)
+            }
         }
     }
 
@@ -311,20 +448,105 @@ class CommandsViewModel(
             getEffectiveDebugSecret(appContext)
         } else ""
         val projId = getActiveProjectId(appContext)
+        val initialTier = networkConnectivityMonitor.currentTier
+        previousObservedNetworkTier = initialTier
         _state.update {
             it.copy(
                 appCheckDebugToken = debugToken,
                 activeProjectId = projId,
-                isPrivacyModeEnabled = privacyPreferences.isPrivacyModeEnabled()
+                isPrivacyModeEnabled = privacyPreferences.isPrivacyModeEnabled(),
+                predictiveLearningEnabled = memoryAndHabitPreferences.isPredictiveLearningEnabled(),
+                anonymizedHabitGeminiConsent = memoryAndHabitPreferences.isAnonymizedHabitGeminiConsent(),
+                morningRoutineApproved = memoryAndHabitPreferences.isMorningRoutineApproved(),
+                networkTier = initialTier,
+                geminiTimeoutSeconds = resolveTimeoutSeconds(initialTier),
+                modelConnectionStatus = if (initialTier == NetworkTier.OFFLINE) {
+                    ModelConnectionStatus.Disconnected(
+                        category = DisconnectionCategory.NETWORK_ERROR,
+                        exactError = "Offline (ConnectivityManager)",
+                        explanationAr = "لا يوجد اتصال بالإنترنت حالياً — الأوامر المحلية تعمل فوراً، وأوامر Gemini تُحفظ في الطابور."
+                    )
+                } else {
+                    it.modelConnectionStatus
+                }
             )
         }
         viewModelScope.launch {
+            networkConnectivityMonitor.networkTierFlow.collect { tier ->
+                val wasOffline = previousObservedNetworkTier == NetworkTier.OFFLINE
+                previousObservedNetworkTier = tier
+                _state.update { current ->
+                    val nextStatus = when {
+                        tier == NetworkTier.OFFLINE -> ModelConnectionStatus.Disconnected(
+                            category = DisconnectionCategory.NETWORK_ERROR,
+                            exactError = "Offline (ConnectivityManager)",
+                            explanationAr = "لا يوجد اتصال بالإنترنت حالياً — الأوامر المحلية تعمل فوراً، وأوامر Gemini تُحفظ في الطابور."
+                        )
+                        current.modelConnectionStatus is ModelConnectionStatus.Disconnected &&
+                            current.modelConnectionStatus.category == DisconnectionCategory.NETWORK_ERROR ->
+                            ModelConnectionStatus.NotChecked
+                        else -> current.modelConnectionStatus
+                    }
+                    current.copy(
+                        networkTier = tier,
+                        geminiTimeoutSeconds = resolveTimeoutSeconds(tier),
+                        modelConnectionStatus = nextStatus
+                    )
+                }
+                if (wasOffline && tier != NetworkTier.OFFLINE) {
+                    drainPendingQueuedCommands()
+                }
+            }
+        }
+        viewModelScope.launch {
+            queuedCommandDao.observePendingCount().collect { count ->
+                _state.update { it.copy(queuedCommandsCount = count) }
+            }
+        }
+        viewModelScope.launch {
             privacyPreferences.privacyModeEnabled.collect { isEnabled ->
-                _state.update { it.copy(isPrivacyModeEnabled = isEnabled) }
+                _state.update {
+                    it.copy(
+                        isPrivacyModeEnabled = isEnabled,
+                        activePredictiveSuggestion = if (isEnabled) null else it.activePredictiveSuggestion
+                    )
+                }
                 if (isEnabled) {
                     conversationTurns.clear()
                     ScreenStateBridge.clearSnapshot()
                 }
+            }
+        }
+        viewModelScope.launch {
+            memoryAndHabitPreferences.predictiveLearningEnabled.collect { enabled ->
+                _state.update {
+                    it.copy(
+                        predictiveLearningEnabled = enabled,
+                        activePredictiveSuggestion = if (!enabled) null else it.activePredictiveSuggestion
+                    )
+                }
+                if (enabled) {
+                    refreshPredictiveSuggestion()
+                }
+            }
+        }
+        viewModelScope.launch {
+            memoryAndHabitPreferences.anonymizedHabitGeminiConsent.collect { consented ->
+                _state.update { it.copy(anonymizedHabitGeminiConsent = consented) }
+            }
+        }
+        viewModelScope.launch {
+            memoryAndHabitPreferences.morningRoutineApproved.collect { approved ->
+                _state.update { it.copy(morningRoutineApproved = approved) }
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            hydrateConversationWindowFromRoom()
+            val installed = runCatching { ensureInstalledAppsLoaded() }.getOrDefault(emptyList())
+            runCatching { habitLearningEngine.syncHabits(installed) }
+            runCatching { refreshPredictiveSuggestion() }
+            if (networkConnectivityMonitor.currentTier != NetworkTier.OFFLINE) {
+                runCatching { drainPendingQueuedCommands() }
             }
         }
         observeInstalledApps()
@@ -334,8 +556,26 @@ class CommandsViewModel(
         sensitiveActionGate.setApprovalHandler { request ->
             requestUserApprovalViaUi(request)
         }
-        if (BuildConfig.DEBUG) {
+        if (BuildConfig.DEBUG && initialTier != NetworkTier.OFFLINE) {
             checkModelConnection(isInitialSelfCheck = true)
+        }
+    }
+
+    private suspend fun hydrateConversationWindowFromRoom() {
+        if (privacyPreferences.isPrivacyModeEnabled()) return
+        val recentStored = runCatching {
+            chatHistoryRepository.observeRecentMessages(MAX_ACTIVE_CONVERSATION_TURNS).first()
+        }.getOrDefault(emptyList())
+        if (recentStored.isEmpty()) return
+        synchronized(conversationTurns) {
+            if (conversationTurns.isEmpty()) {
+                recentStored.forEach { msg ->
+                    val role = if (msg.sender == ChatSender.USER.name) "user" else "model"
+                    if (msg.text.isNotBlank()) {
+                        conversationTurns.add(ChatTurn(role, msg.text))
+                    }
+                }
+            }
         }
     }
 
@@ -348,6 +588,7 @@ class CommandsViewModel(
     }
 
     fun dismissActiveError() {
+        clearCachedRecordedAudio()
         _state.update {
             it.copy(
                 activeError = null,
@@ -359,9 +600,16 @@ class CommandsViewModel(
 
     fun retryActiveError() {
         val error = _state.value.activeError
-        dismissActiveError()
+        _state.update {
+            it.copy(
+                activeError = null,
+                isErrorDetailsExpanded = false,
+                uiState = if (it.uiState is CommandsUiState.Error) CommandsUiState.Idle else it.uiState
+            )
+        }
         when (error?.retryType) {
             ErrorRetryType.COMMAND -> {
+                clearCachedRecordedAudio()
                 val cmd = error.retryCommand ?: lastSubmittedCommand
                 if (!cmd.isNullOrBlank()) {
                     analyzeAndPlanCommand(cmd, addUserBubble = false)
@@ -378,22 +626,56 @@ class CommandsViewModel(
                 }
             }
             ErrorRetryType.GAMEPLAY -> {
+                clearCachedRecordedAudio()
                 analyzeAndPlanCommand(lastGameplayGoal ?: "العب لعبة", addUserBubble = false)
             }
             ErrorRetryType.MINI_CHAT -> {
+                clearCachedRecordedAudio()
                 val cmd = error.retryCommand
                 if (!cmd.isNullOrBlank()) {
                     submitMiniChatCommand(cmd)
                 }
             }
-            ErrorRetryType.CONNECTION_CHECK, null -> checkModelConnection()
+            ErrorRetryType.CONNECTION_CHECK, null -> {
+                clearCachedRecordedAudio()
+                checkModelConnection()
+            }
         }
     }
 
     fun checkModelConnection(isInitialSelfCheck: Boolean = false) {
         viewModelScope.launch {
+            val currentTier = networkConnectivityMonitor.refreshNow()
+            if (currentTier == NetworkTier.OFFLINE) {
+                val offlineMsg = "لا يوجد اتصال بالإنترنت حالياً — الأوامر المحلية تعمل فوراً، وأوامر Gemini تُحفظ في الطابور."
+                _state.update {
+                    it.copy(
+                        networkTier = NetworkTier.OFFLINE,
+                        geminiTimeoutSeconds = resolveTimeoutSeconds(NetworkTier.OFFLINE),
+                        statusNoticeAr = "",
+                        modelConnectionStatus = ModelConnectionStatus.Disconnected(
+                            category = DisconnectionCategory.NETWORK_ERROR,
+                            exactError = "Offline (ConnectivityManager)",
+                            explanationAr = offlineMsg
+                        ),
+                        activeError = if (!isInitialSelfCheck) {
+                            CompactErrorState(
+                                titleAr = DisconnectionCategory.NETWORK_ERROR.titleAr,
+                                summaryAr = offlineMsg,
+                                technicalDetails = "ConnectivityManager reports OFFLINE",
+                                retryType = ErrorRetryType.CONNECTION_CHECK
+                            )
+                        } else {
+                            it.activeError
+                        }
+                    )
+                }
+                return@launch
+            }
             _state.update {
                 it.copy(
+                    networkTier = currentTier,
+                    geminiTimeoutSeconds = resolveTimeoutSeconds(currentTier),
                     modelConnectionStatus = ModelConnectionStatus.Checking,
                     activeError = if (!isInitialSelfCheck) null else it.activeError,
                     isErrorDetailsExpanded = false
@@ -636,7 +918,18 @@ class CommandsViewModel(
         _state.update { it.copy(isListening = false) }
     }
 
-    private fun processRecordedAudio(bytes: ByteArray, mimeType: String) {
+    private fun clearCachedRecordedAudio() {
+        lastRecordedAudio?.first?.fill(0)
+        lastRecordedAudio = null
+    }
+
+    internal fun hasCachedRecordedAudioForTest(): Boolean = lastRecordedAudio != null
+
+    internal fun processRecordedAudio(
+        bytes: ByteArray,
+        mimeType: String,
+        fromMiniChat: Boolean = false
+    ) {
         lastRecordedAudio = bytes to mimeType
         activeTaskJob?.cancel()
         activeTaskJob = viewModelScope.launch {
@@ -652,6 +945,25 @@ class CommandsViewModel(
                 )
             }
             try {
+                if (networkConnectivityMonitor.refreshNow() == NetworkTier.OFFLINE) {
+                    clearCachedRecordedAudio()
+                    val offlineAudioMsg = "أنت غير متصل بالإنترنت حالياً، لذلك تعذّر تفريغ التسجيل الصوتي عبر Gemini. استخدم أوامر مثل «افتح واتساب» أو «شغل الواي فاي» عبر الكتابة أو بعد عودة الشبكة."
+                    chatHistoryRepository.addAgentMessage(offlineAudioMsg, ChatMessageType.TEXT)
+                    if (fromMiniChat) {
+                        floatingControlManager.showMiniChatReply(offlineAudioMsg)
+                    }
+                    _state.update {
+                        it.copy(
+                            isBusyWorking = false,
+                            statusNoticeAr = "",
+                            lastSpokenReply = offlineAudioMsg,
+                            uiState = CommandsUiState.Idle
+                        )
+                    }
+                    speakIfEnabled(offlineAudioMsg)
+                    return@launch
+                }
+
                 startGeminiProgressTimer(
                     doingNowAr = "أحلّل التسجيل الصوتي وأحوّله إلى خطة واضحة...",
                     nextStepAr = "عرض نص الأمر وخطة التنفيذ لمراجعتك",
@@ -667,6 +979,7 @@ class CommandsViewModel(
                         _state.update { it.copy(statusNoticeAr = statusMsg, liveDoingNowAr = statusMsg) }
                     }
                 )
+                clearCachedRecordedAudio()
                 stopGeminiProgressTimer()
                 val (transcript, rawPlan) = audioMeta.value
                 recordModelRouteUsage(audioMeta, transcript)
@@ -689,6 +1002,9 @@ class CommandsViewModel(
                     )
                     recordConversationTurn(transcript, commandPolicy.reasonAr)
                     chatHistoryRepository.addAgentMessage(commandPolicy.reasonAr, ChatMessageType.TEXT)
+                    if (fromMiniChat) {
+                        floatingControlManager.showMiniChatReply(commandPolicy.reasonAr)
+                    }
                     _state.update {
                         it.copy(
                             inputText = "",
@@ -705,6 +1021,9 @@ class CommandsViewModel(
                 val route = ChatIntentRouter.classifyIntent(transcript, appLabels)
                 if (route !is ChatRouteIntent.ExecuteCommandPlan) {
                     handleNonPlanIntent(route, installed, transcript)
+                    if (fromMiniChat) {
+                        floatingControlManager.showMiniChatReply(_state.value.lastSpokenReply.ifBlank { "تم تنفيذ الأمر الصوتي." })
+                    }
                     _state.update { it.copy(inputText = "", isBusyWorking = false, statusNoticeAr = "") }
                     return@launch
                 }
@@ -724,6 +1043,9 @@ class CommandsViewModel(
                     )
                     recordConversationTurn(transcript, planPolicy.reasonAr)
                     chatHistoryRepository.addAgentMessage(planPolicy.reasonAr, ChatMessageType.TEXT)
+                    if (fromMiniChat) {
+                        floatingControlManager.showMiniChatReply(planPolicy.reasonAr)
+                    }
                     _state.update {
                         it.copy(
                             inputText = "",
@@ -741,6 +1063,9 @@ class CommandsViewModel(
                 val planSummaryMsg = buildPlanChatSummary(groundedPlan)
                 recordConversationTurn(transcript, planSummaryMsg)
                 chatHistoryRepository.addAgentMessage(planSummaryMsg, ChatMessageType.PLAN)
+                if (fromMiniChat) {
+                    floatingControlManager.showMiniChatReply(groundedPlan.spokenReplyAr.ifBlank { planSummaryMsg })
+                }
 
                 _state.update {
                     it.copy(
@@ -771,10 +1096,14 @@ class CommandsViewModel(
                     )
                 }
             } catch (e: CancellationException) {
+                clearCachedRecordedAudio()
                 stopGeminiProgressTimer()
                 throw e
             } catch (e: Exception) {
                 stopGeminiProgressTimer()
+                if (fromMiniChat) {
+                    floatingControlManager.showMiniChatReply("تعذر تحليل الصوت حالياً، حاول مجدداً.")
+                }
                 handleGeminiFailure("Audio planning", e, retryType = ErrorRetryType.VOICE)
             }
         }
@@ -806,157 +1135,81 @@ class CommandsViewModel(
         executionController.reset()
 
         activeTaskJob = viewModelScope.launch {
-            _state.update {
-                it.copy(
-                    inputText = if (commandOverride == null) "" else it.inputText,
-                    uiState = CommandsUiState.Idle,
-                    pendingApprovalStep = null,
-                    pendingApprovalPlan = null,
-                    isExecuting = false,
-                    isGameplayRunning = false,
-                    isBusyWorking = true,
-                    activeError = null,
-                    isErrorDetailsExpanded = false,
-                    statusNoticeAr = "يفكر الوكيل ويتحقق من الشاشة الحقيقية... ${AgentPromptRules.WAIT_THINKING_NOTICE_AR}",
-                    executionTruthReportAr = null
+            if (commandOverride == null) {
+                _state.update { it.copy(inputText = "") }
+            }
+            executeCommandInternal(
+                command = command,
+                addUserBubble = addUserBubble,
+                allowQueueWhenOffline = true
+            )
+        }
+    }
+
+    internal suspend fun executeCommandInternal(
+        command: String,
+        addUserBubble: Boolean = true,
+        allowQueueWhenOffline: Boolean = true
+    ): Boolean {
+        _state.update {
+            it.copy(
+                uiState = CommandsUiState.Idle,
+                pendingApprovalStep = null,
+                pendingApprovalPlan = null,
+                isExecuting = false,
+                isGameplayRunning = false,
+                isBusyWorking = true,
+                activeError = null,
+                isErrorDetailsExpanded = false,
+                statusNoticeAr = "يفكر الوكيل ويتحقق من الشاشة الحقيقية... ${AgentPromptRules.WAIT_THINKING_NOTICE_AR}",
+                executionTruthReportAr = null
+            )
+        }
+
+        return try {
+            if (addUserBubble) {
+                chatHistoryRepository.addUserMessage(command)
+            }
+            val installed = ensureInstalledAppsLoaded()
+            val appLabels = installed.map { it.label }
+
+            // 1. فحص الممنوعات الصارمة (كلمات مرور، بصمة، دفع، حذف بيانات، تحويل أموال...)
+            val initialPolicy = agentPolicy.evaluateCommand(command, appLabels)
+            if (!initialPolicy.allowed) {
+                val reason = initialPolicy.reasonAr
+                val logDetails = if (privacyPreferences.isPrivacyModeEnabled()) {
+                    "السبب: $reason"
+                } else {
+                    "${com.example.security.SensitiveDataScrubber.scrub(command)} | السبب: $reason"
+                }
+                actionLogRepository.logAction(
+                    title = "رفض أمر وفق سياسة الوكيل",
+                    details = logDetails,
+                    status = ActionStatus.CANCELLED,
+                    actionType = "POLICY_REJECTED"
                 )
+                recordConversationTurn(command, reason)
+                chatHistoryRepository.addAgentMessage(reason, ChatMessageType.TEXT)
+                _state.update {
+                    it.copy(
+                        isBusyWorking = false,
+                        statusNoticeAr = "",
+                        lastSpokenReply = reason,
+                        uiState = CommandsUiState.Idle
+                    )
+                }
+                speakIfEnabled(reason)
+                return false
             }
 
-            try {
-                if (addUserBubble) {
-                    chatHistoryRepository.addUserMessage(command)
-                }
-                val installed = ensureInstalledAppsLoaded()
-                val appLabels = installed.map { it.label }
-
-                // 1. فحص الممنوعات الصارمة (كلمات مرور، بصمة، دفع، حذف بيانات، تحويل أموال...) مع استثناء تنظيف الملفات الآمن
-                val initialPolicy = agentPolicy.evaluateCommand(command, appLabels)
-                if (!initialPolicy.allowed) {
-                    val reason = initialPolicy.reasonAr
-                    val logDetails = if (privacyPreferences.isPrivacyModeEnabled()) {
-                        "السبب: $reason"
-                    } else {
-                        "${com.example.security.SensitiveDataScrubber.scrub(command)} | السبب: $reason"
-                    }
-                    actionLogRepository.logAction(
-                        title = "رفض أمر وفق سياسة الوكيل",
-                        details = logDetails,
-                        status = ActionStatus.CANCELLED,
-                        actionType = "POLICY_REJECTED"
-                    )
-                    recordConversationTurn(command, reason)
-                    chatHistoryRepository.addAgentMessage(reason, ChatMessageType.TEXT)
-                    _state.update {
-                        it.copy(
-                            isBusyWorking = false,
-                            statusNoticeAr = "",
-                            lastSpokenReply = reason,
-                            uiState = CommandsUiState.Idle
+            when (val route = ChatIntentRouter.classifyIntent(command, appLabels)) {
+                is ChatRouteIntent.ExecuteCommandPlan -> {
+                    val currentTier = networkConnectivityMonitor.refreshNow()
+                    if (currentTier == NetworkTier.OFFLINE && allowQueueWhenOffline) {
+                        enqueueOfflineCommand(
+                            commandText = command,
+                            reasonAr = "الأوامر المحلية مثل فتح التطبيقات والمنبه والتذكير والواي فاي والاتصال تعمل فوراً بدون شبكة."
                         )
-                    }
-                    speakIfEnabled(reason)
-                    return@launch
-                }
-
-                when (val route = ChatIntentRouter.classifyIntent(command, appLabels)) {
-                    is ChatRouteIntent.ExecuteCommandPlan -> {
-                        val commandPolicy = agentPolicy.evaluateCommand(command, appLabels)
-                        if (!commandPolicy.allowed) {
-                            val logDetails = if (privacyPreferences.isPrivacyModeEnabled()) {
-                                "السبب: ${commandPolicy.reasonAr}"
-                            } else {
-                                "${com.example.security.SensitiveDataScrubber.scrub(command)} | السبب: ${commandPolicy.reasonAr}"
-                            }
-                            actionLogRepository.logAction(
-                                title = "رفض أمر وفق سياسة الوكيل",
-                                details = logDetails,
-                                status = ActionStatus.CANCELLED,
-                                actionType = "POLICY_REJECTED"
-                            )
-                            recordConversationTurn(command, commandPolicy.reasonAr)
-                            chatHistoryRepository.addAgentMessage(commandPolicy.reasonAr, ChatMessageType.TEXT)
-                            _state.update {
-                                it.copy(
-                                    isBusyWorking = false,
-                                    statusNoticeAr = "",
-                                    lastSpokenReply = commandPolicy.reasonAr,
-                                    uiState = CommandsUiState.Idle
-                                )
-                            }
-                            speakIfEnabled(commandPolicy.reasonAr)
-                            return@launch
-                        }
-
-                        _state.update {
-                            it.copy(
-                                uiState = CommandsUiState.Planning,
-                                statusNoticeAr = "أجهّز لك خطة التنفيذ خطوة بخطوة... ${AgentPromptRules.WAIT_THINKING_NOTICE_AR}"
-                            )
-                        }
-                        startGeminiProgressTimer(
-                            doingNowAr = "أفحص طلبك وأجهّز خطة العمل عبر Gemini...",
-                            nextStepAr = "عرض الخطوات المرقّمة ومراجعة أي إجراء حساس",
-                            waitingAr = "انتظار استجابة النموذج (يمكنك الإيقاف في أي لحظة)"
-                        )
-                        val rawScreenSummary = if (privacyPreferences.isPrivacyModeEnabled()) {
-                            ScreenStateBridge.getService()?.captureCurrentScreen()?.toMinimalPrivacyPromptText()
-                                ?: "سياق مقتضب (وضع الخصوصية مفعّل)"
-                        } else {
-                            ScreenStateBridge.getService()?.captureCurrentScreen()
-                                ?.toCompactPromptText()
-                                ?: "داخل تطبيق وكيل الهاتف (خدمة إمكانية الوصول غير مفعلة حالياً)"
-                        }
-
-                        val planMeta = geminiRepository.generateCommandPlanWithMeta(
-                            userCommand = command,
-                            installedAppNames = appLabels,
-                            currentScreenSummary = AgentPromptRules.enrichPlanScreenSummary(rawScreenSummary),
-                            onStatusUpdate = { statusMsg ->
-                                _state.update { it.copy(statusNoticeAr = statusMsg, liveDoingNowAr = statusMsg) }
-                            }
-                        )
-                        stopGeminiProgressTimer()
-                        recordModelRouteUsage(planMeta, command)
-                        val rawPlan = planMeta.value
-
-                        val planPolicy = agentPolicy.validatePlan(rawPlan)
-                        if (!planPolicy.allowed) {
-                            val logDetails = if (privacyPreferences.isPrivacyModeEnabled()) {
-                                "السبب: ${planPolicy.reasonAr}"
-                            } else {
-                                "${com.example.security.SensitiveDataScrubber.scrub(command)} | السبب: ${planPolicy.reasonAr}"
-                            }
-                            actionLogRepository.logAction(
-                                title = "رفض خطة Gemini وفق سياسة الوكيل",
-                                details = logDetails,
-                                status = ActionStatus.CANCELLED,
-                                actionType = "POLICY_REJECTED_PLAN"
-                            )
-                            recordConversationTurn(command, planPolicy.reasonAr)
-                            chatHistoryRepository.addAgentMessage(planPolicy.reasonAr, ChatMessageType.TEXT)
-                            _state.update {
-                                it.copy(
-                                    isBusyWorking = false,
-                                    statusNoticeAr = "",
-                                    liveDoingNowAr = "",
-                                    liveNextStepAr = "",
-                                    liveWaitingForUserAr = "",
-                                    lastSpokenReply = planPolicy.reasonAr,
-                                    uiState = CommandsUiState.Idle
-                                )
-                            }
-                            speakIfEnabled(planPolicy.reasonAr)
-                            return@launch
-                        }
-
-                        val groundedPlan = screenVerifier.groundPlanAgainstReality(rawPlan, installed)
-                        val planSummary = buildPlanChatSummary(groundedPlan)
-                        recordConversationTurn(command, planSummary)
-                        chatHistoryRepository.addAgentMessage(
-                            planSummary,
-                            ChatMessageType.PLAN
-                        )
-
                         _state.update {
                             it.copy(
                                 isBusyWorking = false,
@@ -964,79 +1217,494 @@ class CommandsViewModel(
                                 liveDoingNowAr = "",
                                 liveNextStepAr = "",
                                 liveWaitingForUserAr = "",
-                                lastSpokenReply = groundedPlan.spokenReplyAr,
-                                uiState = CommandsUiState.PlanActive(groundedPlan)
+                                uiState = CommandsUiState.Idle
                             )
                         }
-                        speakIfEnabled(groundedPlan.spokenReplyAr)
+                        return true
                     }
 
-                    else -> {
-                        handleNonPlanIntent(route, installed, command)
+                    _state.update {
+                        it.copy(
+                            uiState = CommandsUiState.Planning,
+                            statusNoticeAr = "أجهّز لك خطة التنفيذ خطوة بخطوة... ${AgentPromptRules.WAIT_THINKING_NOTICE_AR}"
+                        )
+                    }
+                    startGeminiProgressTimer(
+                        doingNowAr = "أفحص طلبك وأجهّز خطة العمل عبر Gemini...",
+                        nextStepAr = "عرض الخطوات المرقّمة ومراجعة أي إجراء حساس",
+                        waitingAr = "انتظار استجابة النموذج (يمكنك الإيقاف في أي لحظة)"
+                    )
+                    val rawScreenSummary = if (privacyPreferences.isPrivacyModeEnabled()) {
+                        ScreenStateBridge.getService()?.captureCurrentScreen()?.toMinimalPrivacyPromptText()
+                            ?: "سياق مقتضب (وضع الخصوصية مفعّل)"
+                    } else {
+                        ScreenStateBridge.getService()?.captureCurrentScreen()
+                            ?.toCompactPromptText()
+                            ?: "داخل تطبيق وكيل الهاتف (خدمة إمكانية الوصول غير مفعلة حالياً)"
+                    }
+
+                    val memoryContext = if (privacyPreferences.isPrivacyModeEnabled()) {
+                        ""
+                    } else {
+                        userMemoryRepository.buildConciseMemoryContext(600)
+                    }
+                    val enrichedScreenSummary = buildString {
+                        append(AgentPromptRules.enrichPlanScreenSummary(rawScreenSummary))
+                        if (memoryContext.isNotBlank()) {
+                            appendLine()
+                            append(memoryContext)
+                        }
+                    }.trim()
+
+                    val planMeta = geminiRepository.generateCommandPlanWithMeta(
+                        userCommand = command,
+                        installedAppNames = appLabels,
+                        currentScreenSummary = enrichedScreenSummary,
+                        onStatusUpdate = { statusMsg ->
+                            _state.update { it.copy(statusNoticeAr = statusMsg, liveDoingNowAr = statusMsg) }
+                        }
+                    )
+                    stopGeminiProgressTimer()
+                    recordModelRouteUsage(planMeta, command)
+                    val rawPlan = planMeta.value
+
+                    val planPolicy = agentPolicy.validatePlan(rawPlan)
+                    if (!planPolicy.allowed) {
+                        val logDetails = if (privacyPreferences.isPrivacyModeEnabled()) {
+                            "السبب: ${planPolicy.reasonAr}"
+                        } else {
+                            "${com.example.security.SensitiveDataScrubber.scrub(command)} | السبب: ${planPolicy.reasonAr}"
+                        }
+                        actionLogRepository.logAction(
+                            title = "رفض خطة Gemini وفق سياسة الوكيل",
+                            details = logDetails,
+                            status = ActionStatus.CANCELLED,
+                            actionType = "POLICY_REJECTED_PLAN"
+                        )
+                        recordConversationTurn(command, planPolicy.reasonAr)
+                        chatHistoryRepository.addAgentMessage(planPolicy.reasonAr, ChatMessageType.TEXT)
                         _state.update {
                             it.copy(
                                 isBusyWorking = false,
                                 statusNoticeAr = "",
                                 liveDoingNowAr = "",
                                 liveNextStepAr = "",
-                                liveWaitingForUserAr = ""
+                                liveWaitingForUserAr = "",
+                                lastSpokenReply = planPolicy.reasonAr,
+                                uiState = CommandsUiState.Idle
                             )
                         }
+                        speakIfEnabled(planPolicy.reasonAr)
+                        return false
                     }
-                }
-            } catch (e: TimeoutCancellationException) {
-                stopGeminiProgressTimer()
-                _state.update {
-                    it.copy(
-                        isBusyWorking = false,
-                        statusNoticeAr = "",
-                        liveDoingNowAr = "",
-                        liveNextStepAr = "",
-                        liveWaitingForUserAr = "",
-                        uiState = CommandsUiState.Idle,
-                        activeError = CompactErrorState(
-                            titleAr = "انتهت مهلة الاتصال",
-                            summaryAr = "استغرقت الاستجابة وقتاً أطول من المهلة الإجمالية (${it.geminiTimeoutSeconds} ثانية). أعد المحاولة الآن.",
-                            technicalDetails = e.message ?: "TimeoutCancellationException",
-                            retryCommand = command,
-                            retryType = ErrorRetryType.COMMAND
-                        )
+
+                    val groundedPlan = screenVerifier.groundPlanAgainstReality(rawPlan, installed)
+                    val planSummary = buildPlanChatSummary(groundedPlan)
+                    recordConversationTurn(command, planSummary)
+                    chatHistoryRepository.addAgentMessage(
+                        planSummary,
+                        ChatMessageType.PLAN
                     )
+
+                    _state.update {
+                        it.copy(
+                            isBusyWorking = false,
+                            statusNoticeAr = "",
+                            liveDoingNowAr = "",
+                            liveNextStepAr = "",
+                            liveWaitingForUserAr = "",
+                            lastSpokenReply = groundedPlan.spokenReplyAr,
+                            uiState = CommandsUiState.PlanActive(groundedPlan)
+                        )
+                    }
+                    speakIfEnabled(groundedPlan.spokenReplyAr)
+                    true
                 }
-            } catch (e: CancellationException) {
-                stopGeminiProgressTimer()
-                throw e
-            } catch (e: Exception) {
-                stopGeminiProgressTimer()
-                handleGeminiFailure(
-                    contextTag = "Chat command",
-                    e = e,
-                    retryType = ErrorRetryType.COMMAND,
-                    retryCommand = command
+
+                else -> {
+                    handleNonPlanIntent(route, installed, command, allowQueueWhenOffline = allowQueueWhenOffline)
+                    _state.update {
+                        it.copy(
+                            isBusyWorking = false,
+                            statusNoticeAr = "",
+                            liveDoingNowAr = "",
+                            liveNextStepAr = "",
+                            liveWaitingForUserAr = ""
+                        )
+                    }
+                    true
+                }
+            }
+        } catch (e: TimeoutCancellationException) {
+            stopGeminiProgressTimer()
+            _state.update {
+                it.copy(
+                    isBusyWorking = false,
+                    statusNoticeAr = "",
+                    liveDoingNowAr = "",
+                    liveNextStepAr = "",
+                    liveWaitingForUserAr = "",
+                    uiState = CommandsUiState.Idle,
+                    activeError = CompactErrorState(
+                        titleAr = "انتهت مهلة الاتصال",
+                        summaryAr = "استغرقت الاستجابة وقتاً أطول من المهلة الإجمالية (${it.geminiTimeoutSeconds} ثانية). أعد المحاولة الآن.",
+                        technicalDetails = e.message ?: "TimeoutCancellationException",
+                        retryCommand = command,
+                        retryType = ErrorRetryType.COMMAND
+                    )
                 )
             }
+            false
+        } catch (e: CancellationException) {
+            stopGeminiProgressTimer()
+            throw e
+        } catch (e: Exception) {
+            stopGeminiProgressTimer()
+            handleGeminiFailure(
+                contextTag = "Chat command",
+                e = e,
+                retryType = ErrorRetryType.COMMAND,
+                retryCommand = command
+            )
+            false
         }
     }
 
     private suspend fun handleNonPlanIntent(
         route: ChatRouteIntent,
         installedApps: List<InstalledAppInfo>,
-        rawCommand: String? = null
+        rawCommand: String? = null,
+        allowQueueWhenOffline: Boolean = true
     ) {
         val cmdText = rawCommand.orEmpty()
         when (route) {
             is ChatRouteIntent.ShowApps -> handleShowApps(route, installedApps, cmdText)
             ChatRouteIntent.ReadScreen -> handleReadScreen(installedApps, cmdText)
             ChatRouteIntent.ShowActionHistory -> handleShowActionHistory(cmdText)
+            ChatRouteIntent.MorningRoutine -> handleMorningRoutine(installedApps, cmdText)
+            ChatRouteIntent.SummarizeMyDay -> handleSummarizeMyDay(installedApps, cmdText)
             ChatRouteIntent.PromptReminderDetails -> handlePromptReminderDetails(cmdText)
             is ChatRouteIntent.CreateTaskOrReminder -> handleCreateTaskOrReminder(route, cmdText)
             ChatRouteIntent.ListTasksAndReminders -> handleListTasks(cmdText)
             is ChatRouteIntent.CancelTaskOrReminder -> handleCancelTaskByQuery(route.queryText, cmdText)
             is ChatRouteIntent.StartGameplay -> startGameplayGoal(route.goalText)
             is ChatRouteIntent.FileManagement -> handleFileManagement(route.queryText, cmdText)
-            is ChatRouteIntent.ConversationalChat -> handleConversationalChat(route.message, rawCommand ?: route.message)
+            is ChatRouteIntent.LocalOpenApp -> handleLocalOpenApp(route, installedApps)
+            is ChatRouteIntent.LocalDialPhone -> handleLocalDialPhone(route, cmdText)
+            is ChatRouteIntent.LocalToggleWifi -> handleLocalToggleWifi(route, cmdText)
+            is ChatRouteIntent.ConversationalChat -> handleConversationalChat(
+                userMessage = route.message,
+                retryCommand = rawCommand ?: route.message,
+                allowQueueWhenOffline = allowQueueWhenOffline
+            )
             is ChatRouteIntent.ExecuteCommandPlan -> Unit
         }
+    }
+
+    private suspend fun enqueueOfflineCommand(commandText: String, reasonAr: String) {
+        queuedCommandDao.enqueue(
+            QueuedCommandEntity(
+                commandText = commandText,
+                status = QueuedCommandStatus.PENDING.name
+            )
+        )
+        val queueMsg = "أنت غير متصل بالإنترنت حالياً. أضفت الأمر «$commandText» إلى طابور الانتظار في القاعدة وسأنفّذه تلقائياً مع إشعارك فور عودة الشبكة.\n($reasonAr)"
+        actionLogRepository.logAction(
+            title = "جدولة أمر في طابور انتظار الشبكة",
+            details = com.example.security.SensitiveDataScrubber.scrub(commandText),
+            status = ActionStatus.PENDING_APPROVAL,
+            actionType = "OFFLINE_COMMAND_QUEUED"
+        )
+        recordConversationTurn(commandText, queueMsg)
+        chatHistoryRepository.addAgentMessage(queueMsg, ChatMessageType.TEXT)
+        _state.update {
+            it.copy(
+                lastSpokenReply = queueMsg,
+                queuedCommandsCount = it.queuedCommandsCount + 1
+            )
+        }
+        speakIfEnabled(queueMsg)
+    }
+
+    internal suspend fun drainPendingQueuedCommands(): Int = queueDrainMutex.withLock {
+        if (networkConnectivityMonitor.refreshNow() == NetworkTier.OFFLINE) {
+            return@withLock 0
+        }
+        val pending = queuedCommandDao.getPendingCommands()
+        if (pending.isEmpty()) return@withLock 0
+
+        var processedCount = 0
+        for (item in pending) {
+            if (networkConnectivityMonitor.refreshNow() == NetworkTier.OFFLINE) break
+            queuedCommandDao.updateStatus(
+                id = item.id,
+                status = QueuedCommandStatus.RUNNING.name,
+                executedAt = null,
+                errorMessage = null
+            )
+            val ok = runCatching {
+                executeCommandInternal(
+                    command = item.commandText,
+                    addUserBubble = false,
+                    allowQueueWhenOffline = false
+                )
+            }.getOrDefault(false)
+
+            val now = System.currentTimeMillis()
+            if (ok) {
+                processedCount++
+                queuedCommandDao.updateStatus(
+                    id = item.id,
+                    status = QueuedCommandStatus.COMPLETED.name,
+                    executedAt = now,
+                    errorMessage = null
+                )
+                val doneMsg = "✅ عاد الاتصال بالشبكة: نُفّذ الأمر المجدول «${item.commandText}» بنجاح."
+                chatHistoryRepository.addAgentMessage(doneMsg, ChatMessageType.TEXT)
+                showQueuedCommandNotification(item.commandText, success = true)
+            } else {
+                queuedCommandDao.updateStatus(
+                    id = item.id,
+                    status = QueuedCommandStatus.FAILED.name,
+                    executedAt = now,
+                    errorMessage = "تعذر التنفيذ التلقائي بعد عودة الشبكة"
+                )
+                showQueuedCommandNotification(item.commandText, success = false)
+            }
+        }
+        processedCount
+    }
+
+    private fun showQueuedCommandNotification(commandText: String, success: Boolean) {
+        runCatching {
+            ReminderReceiver.ensureReminderChannel(appContext)
+            val canNotify = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    appContext,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+            if (!canNotify) return
+
+            val openIntent = Intent(appContext, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val notifId = ((System.currentTimeMillis() % 100_000L).toInt() + 8000)
+            val pendingIntent = android.app.PendingIntent.getActivity(
+                appContext,
+                notifId,
+                openIntent,
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+            )
+            val title = if (success) "اكتمل تنفيذ أمر من الطابور" else "تعذّر تنفيذ أمر من الطابور"
+            val body = if (success) {
+                "عاد الاتصال وتم تنفيذ: $commandText"
+            } else {
+                "عاد الاتصال لكن تعذّر إكمال: $commandText"
+            }
+            val notification = NotificationCompat.Builder(appContext, ReminderReceiver.CHANNEL_ID)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
+            NotificationManagerCompat.from(appContext).notify(notifId, notification)
+        }
+    }
+
+    private suspend fun handleLocalOpenApp(
+        route: ChatRouteIntent.LocalOpenApp,
+        installedApps: List<InstalledAppInfo>
+    ) {
+        when (val match = AppNameMatcher.match(route.appQuery, installedApps)) {
+            is AppMatchResult.SingleMatch -> {
+                val app = match.app
+                val launchIntent = AppOrganizer.createLaunchIntent(appContext, app.packageName)
+                if (launchIntent == null) {
+                    val reply = "تطبيق «${app.label}» مثبّت لكن لا يملك واجهة تشغيل مباشرة."
+                    actionLogRepository.logAction(
+                        title = "تعذر فتح ${app.label}",
+                        details = reply,
+                        status = ActionStatus.FAILED,
+                        actionType = "LOCAL_OPEN_APP_NO_LAUNCHER"
+                    )
+                    recordConversationTurn(route.rawCommand, reply)
+                    chatHistoryRepository.addAgentMessage(reply, ChatMessageType.ERROR)
+                    _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
+                    speakIfEnabled(reply)
+                    return
+                }
+                val launched = runCatching { appContext.startActivity(launchIntent) }.isSuccess
+                val reply = if (launched) {
+                    "تم فتح «${app.label}» محلياً دون الحاجة إلى الشبكة."
+                } else {
+                    "تعذّر فتح «${app.label}» من النظام حالياً."
+                }
+                if (launched) {
+                    val cal = Calendar.getInstance()
+                    runCatching {
+                        userMemoryRepository.recordHabit(
+                            actionName = "فتح ${app.label}",
+                            hourOfDay = cal.get(Calendar.HOUR_OF_DAY),
+                            dayOfWeek = HabitLearningEngine.calendarDayToIso(cal.get(Calendar.DAY_OF_WEEK))
+                        )
+                    }
+                }
+                actionLogRepository.logAction(
+                    title = if (launched) "فتح محلي لتطبيق: ${app.label}" else "فشل فتح: ${app.label}",
+                    details = "${app.packageName} (${match.matchReason})",
+                    status = if (launched) ActionStatus.SUCCESS else ActionStatus.FAILED,
+                    actionType = "LOCAL_OPEN_APP"
+                )
+                recordConversationTurn(route.rawCommand, reply)
+                chatHistoryRepository.addAgentMessage(
+                    reply,
+                    if (launched) ChatMessageType.TEXT else ChatMessageType.ERROR
+                )
+                _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
+                speakIfEnabled(reply)
+            }
+
+            is AppMatchResult.MultipleMatches -> {
+                val jsonArr = JSONArray()
+                match.candidates.forEach { app ->
+                    jsonArr.put(
+                        JSONObject().apply {
+                            put("packageName", app.packageName)
+                            put("label", app.label)
+                            put("folderAr", app.folder.titleAr)
+                        }
+                    )
+                }
+                val names = match.candidates.joinToString("، ") { it.label }
+                val reply = "وجدت ${match.candidates.size} تطبيقات مطابقة لـ «${route.appQuery}» ($names) — أيها تريد فتحه؟ اضغط على التطبيق المطلوب:"
+                recordConversationTurn(route.rawCommand, reply)
+                chatHistoryRepository.addAgentMessage(
+                    text = reply,
+                    type = ChatMessageType.APPS_LIST,
+                    payloadJson = jsonArr.toString()
+                )
+                _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
+                speakIfEnabled("وجدت عدة تطبيقات مطابقة لـ ${route.appQuery}، اختر التطبيق الذي تريده.")
+            }
+
+            is AppMatchResult.NoMatch -> {
+                val normQ = AppNameMatcher.normalize(route.appQuery)
+                if (normQ.contains("اعدادات") || normQ.contains("ضبط") || normQ.contains("settings")) {
+                    val settingsIntent = Intent(Settings.ACTION_SETTINGS).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    val opened = runCatching { appContext.startActivity(settingsIntent) }.isSuccess
+                    val reply = if (opened) {
+                        "تم فتح إعدادات الجهاز محلياً دون الحاجة إلى الشبكة."
+                    } else {
+                        "تعذر فتح إعدادات الجهاز حالياً."
+                    }
+                    actionLogRepository.logAction(
+                        title = "فتح الإعدادات محلياً",
+                        details = reply,
+                        status = if (opened) ActionStatus.SUCCESS else ActionStatus.FAILED,
+                        actionType = "LOCAL_OPEN_SETTINGS"
+                    )
+                    recordConversationTurn(route.rawCommand, reply)
+                    chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
+                    _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
+                    speakIfEnabled(reply)
+                    return
+                }
+
+                val notFoundMsg = "لم أجد أي تطبيق مثبّت يطابق «${route.appQuery}» على جهازك. تأكّد من الاسم أو قل «اعرض تطبيقاتي»."
+                actionLogRepository.logAction(
+                    title = "تعذر العثور على تطبيق: ${route.appQuery}",
+                    details = notFoundMsg,
+                    status = ActionStatus.FAILED,
+                    actionType = "LOCAL_OPEN_APP_NOT_FOUND"
+                )
+                recordConversationTurn(route.rawCommand, notFoundMsg)
+                chatHistoryRepository.addAgentMessage(notFoundMsg, ChatMessageType.ERROR)
+                _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = notFoundMsg) }
+                speakIfEnabled(notFoundMsg)
+            }
+        }
+    }
+
+    private suspend fun handleLocalDialPhone(
+        route: ChatRouteIntent.LocalDialPhone,
+        rawCommand: String
+    ) {
+        val dialIntent = Intent(Intent.ACTION_DIAL).apply {
+            if (!route.phoneNumber.isNullOrBlank()) {
+                data = Uri.parse("tel:${route.phoneNumber}")
+            }
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val opened = runCatching { appContext.startActivity(dialIntent) }.isSuccess
+        val reply = when {
+            !opened -> "تعذر فتح تطبيق الهاتف أو شاشة الاتصال على هذا الجهاز."
+            !route.phoneNumber.isNullOrBlank() ->
+                "فتحت لك شاشة الاتصال بالرقم ${route.phoneNumber} محلياً (دون شبكة) — اضغط اتصال للتأكيد."
+            route.targetQuery.isNotBlank() ->
+                "فتحت شاشة الاتصال للطلب «${route.targetQuery}» محلياً — اختر جهة الاتصال لإتمام المكالمة."
+            else -> "تم فتح شاشة الاتصال محلياً."
+        }
+        actionLogRepository.logAction(
+            title = "فتح شاشة الاتصال محلياً",
+            details = com.example.security.SensitiveDataScrubber.scrub(reply),
+            status = if (opened) ActionStatus.SUCCESS else ActionStatus.FAILED,
+            actionType = "LOCAL_DIAL_PHONE"
+        )
+        recordConversationTurn(rawCommand, reply)
+        chatHistoryRepository.addAgentMessage(
+            reply,
+            if (opened) ChatMessageType.TEXT else ChatMessageType.ERROR
+        )
+        _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
+        speakIfEnabled(reply)
+    }
+
+    private suspend fun handleLocalToggleWifi(
+        route: ChatRouteIntent.LocalToggleWifi,
+        rawCommand: String
+    ) {
+        val primaryIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            Intent(Settings.Panel.ACTION_WIFI).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        } else {
+            Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val openedPrimary = runCatching { appContext.startActivity(primaryIntent) }.isSuccess
+        val openedFallback = if (!openedPrimary) {
+            runCatching {
+                appContext.startActivity(
+                    Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            }.isSuccess
+        } else {
+            true
+        }
+        val actionLabel = when (route.enableHint) {
+            true -> "تشغيل الواي فاي"
+            false -> "إيقاف الواي فاي"
+            null -> "إعدادات الواي فاي"
+        }
+        val reply = if (openedFallback) {
+            "فتحت لك لوحة $actionLabel محلياً دون الحاجة إلى الشبكة لتبديله مباشرة."
+        } else {
+            "تعذر فتح لوحة إعدادات الواي فاي على هذا الجهاز."
+        }
+        actionLogRepository.logAction(
+            title = "فتح لوحة الواي فاي محلياً",
+            details = reply,
+            status = if (openedFallback) ActionStatus.SUCCESS else ActionStatus.FAILED,
+            actionType = "LOCAL_WIFI_PANEL"
+        )
+        recordConversationTurn(rawCommand, reply)
+        chatHistoryRepository.addAgentMessage(
+            reply,
+            if (openedFallback) ChatMessageType.TEXT else ChatMessageType.ERROR
+        )
+        _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = reply) }
+        speakIfEnabled(reply)
     }
 
     private suspend fun handleFileManagement(queryText: String, userCommand: String) {
@@ -1467,62 +2135,46 @@ class CommandsViewModel(
             ?: snapshot.packageName.ifBlank { "الشاشة الحالية" }
 
         val isPrivacyOn = privacyPreferences.isPrivacyModeEnabled()
-        val factualElements = if (isPrivacyOn) {
-            val scrubbedButtons = snapshot.clickableLabels.take(6)
-                .map { com.example.security.SensitiveDataScrubber.scrub(it) }
-                .filter { it.isNotBlank() }
-                .joinToString(" | ")
-            buildString {
-                appendLine("التطبيق الظاهر: $appLabel (${snapshot.packageName})")
-                appendLine("عناصر تفاعلية مقتضبة (وضع الخصوصية مفعّل): ${scrubbedButtons.ifBlank { "لا توجد أزرار ظاهرة" }}")
-            }.trim()
-        } else {
-            buildString {
-                appendLine("التطبيق الظاهر: $appLabel (${snapshot.packageName})")
-                if (snapshot.visibleTexts.isNotEmpty()) {
-                    val scrubbed = snapshot.visibleTexts.take(18).map { com.example.security.SensitiveDataScrubber.scrub(it) }
-                    appendLine("النصوص المرصودة: ${scrubbed.joinToString(" | ")}")
-                }
-                if (snapshot.clickableLabels.isNotEmpty()) {
-                    val scrubbed = snapshot.clickableLabels.take(12).map { com.example.security.SensitiveDataScrubber.scrub(it) }
-                    appendLine("الأزرار والعناصر التفاعلية: ${scrubbed.joinToString(" | ")}")
-                }
-                if (snapshot.editableHints.isNotEmpty()) {
-                    val scrubbed = snapshot.editableHints.take(6).map { com.example.security.SensitiveDataScrubber.scrub(it) }
-                    appendLine("حقول الإدخال: ${scrubbed.joinToString(" | ")}")
-                }
-            }.trim()
-        }
+        val isOffline = networkConnectivityMonitor.refreshNow() == NetworkTier.OFFLINE
 
-        val groundedReply = try {
-            startGeminiProgressTimer(
-                doingNowAr = "أحلّل عناصر شاشة «$appLabel» وألخّصها...",
-                nextStepAr = "عرض ملخص العناصر الفعلية في الدردشة",
-                waitingAr = "انتظار استجابة النموذج"
+        val groundedReply = if (isPrivacyOn || isOffline) {
+            LocalScreenSummarizer.summarizeSnapshot(
+                snapshot = snapshot,
+                appLabel = appLabel,
+                privacyMode = isPrivacyOn
             )
-            val capturedLines = if (isPrivacyOn) {
-                listOf(snapshot.toMinimalPrivacyPromptText())
-            } else {
-                AgentPromptRules.enrichScreenReadLines(snapshot.toCompactPromptText())
+        } else {
+            val factualElements = LocalScreenSummarizer.summarizeSnapshot(
+                snapshot = snapshot,
+                appLabel = appLabel,
+                privacyMode = false
+            )
+            try {
+                startGeminiProgressTimer(
+                    doingNowAr = "أحلّل عناصر شاشة «$appLabel» وألخّصها...",
+                    nextStepAr = "عرض ملخص العناصر الفعلية في الدردشة",
+                    waitingAr = "انتظار استجابة النموذج"
+                )
+                val capturedLines = AgentPromptRules.enrichScreenReadLines(snapshot.toCompactPromptText())
+                val explainMeta = geminiRepository.summarizeAppScreensWithMeta(
+                    appName = appLabel,
+                    packageName = snapshot.packageName,
+                    capturedScreenTexts = capturedLines,
+                    onStatusUpdate = { statusMsg ->
+                        _state.update { it.copy(statusNoticeAr = statusMsg, liveDoingNowAr = statusMsg) }
+                    }
+                )
+                recordModelRouteUsage(explainMeta, "قراءة شاشة $appLabel")
+                "${explainMeta.value}\n\n— العناصر المرصودة فعلياً في «$appLabel»:\n$factualElements"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Screen explanation fell back to LocalScreenSummarizer", e)
+                val reason = classifyModelError(e).category.titleAr
+                "تعذر التلخيص الذكي عبر Gemini ($reason)، إليك الملخص المحلي المرتّب (دون إرسال بيانات):\n\n$factualElements"
+            } finally {
+                stopGeminiProgressTimer()
             }
-            val explainMeta = geminiRepository.summarizeAppScreensWithMeta(
-                appName = appLabel,
-                packageName = snapshot.packageName,
-                capturedScreenTexts = capturedLines,
-                onStatusUpdate = { statusMsg ->
-                    _state.update { it.copy(statusNoticeAr = statusMsg, liveDoingNowAr = statusMsg) }
-                }
-            )
-            recordModelRouteUsage(explainMeta, "قراءة شاشة $appLabel")
-            "${explainMeta.value}\n\n— العناصر المرصودة فعلياً في «$appLabel»:\n$factualElements"
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.w(TAG, "Screen explanation fell back to factual elements", e)
-            val reason = classifyModelError(e).category.titleAr
-            "تعذر التلخيص الذكي عبر Gemini ($reason)، وهذه العناصر الفعلية المرصودة في شاشتك الآن:\n$factualElements"
-        } finally {
-            stopGeminiProgressTimer()
         }
 
         recordConversationTurn(userCommand, groundedReply)
@@ -1715,7 +2367,11 @@ class CommandsViewModel(
         }
     }
 
-    private suspend fun handleConversationalChat(userMessage: String, retryCommand: String = userMessage) {
+    private suspend fun handleConversationalChat(
+        userMessage: String,
+        retryCommand: String = userMessage,
+        allowQueueWhenOffline: Boolean = true
+    ) {
         val installed = ensureInstalledAppsLoaded()
         val appLabels = installed.map { it.label }
 
@@ -1737,13 +2393,44 @@ class CommandsViewModel(
             }
         }
 
-        val historyText = ConversationMemory.formatHistory(conversationTurns)
+        if (networkConnectivityMonitor.refreshNow() == NetworkTier.OFFLINE && allowQueueWhenOffline) {
+            enqueueOfflineCommand(
+                commandText = retryCommand,
+                reasonAr = "تتطلب المحادثة الذكية اتصالاً بالإنترنت؛ أو يمكنك تجربة «افتح واتساب» أو «اعرض تطبيقاتي» أو «شغل الواي فاي» محلياً."
+            )
+            _state.update { it.copy(uiState = CommandsUiState.Idle) }
+            return
+        }
+
+        val isPrivacyOn = privacyPreferences.isPrivacyModeEnabled()
+        val recentSummaries = if (isPrivacyOn) {
+            emptyList()
+        } else {
+            userMemoryRepository.getRecentConversationSummaries(limit = 3).map { it.summaryText }
+        }
+        val historyText = if (isPrivacyOn) {
+            ""
+        } else {
+            ConversationMemory.formatHistoryWithSummaries(
+                summaries = recentSummaries,
+                turns = synchronized(conversationTurns) { conversationTurns.toList() }
+            )
+        }
+        val persistentMemoryContext = if (isPrivacyOn) {
+            ""
+        } else {
+            userMemoryRepository.buildConciseMemoryContext(800)
+        }
         val baseContext = buildString {
             append("تطبيقات محملة: ${cachedInstalledApps.size}. ")
             append(
                 if (ScreenStateBridge.isServiceConnected.value) "إمكانية الوصول مفعلة."
                 else "إمكانية الوصول غير مفعلة."
             )
+            if (persistentMemoryContext.isNotBlank()) {
+                appendLine()
+                append(persistentMemoryContext)
+            }
         }
         try {
             startGeminiProgressTimer(
@@ -2375,7 +3062,12 @@ class CommandsViewModel(
             try {
                 val miniPolicy = agentPolicy.evaluateCommand(command)
                 if (!miniPolicy.allowed) {
-                    val reply = "ممنوع وفق السياسة: ${miniPolicy.violationCategory?.titleAr ?: miniPolicy.reasonAr}"
+                    val reply = miniPolicy.reasonAr.ifBlank {
+                        UserMemoryRepository.formatPlainPolicyRejection(
+                            actionType = "POLICY_BLOCKED_${miniPolicy.violationCategory?.name ?: "MINI_CHAT"}",
+                            category = miniPolicy.violationCategory
+                        )
+                    }
                     recordConversationTurn(command, reply)
                     chatHistoryRepository.addAgentMessage(reply, ChatMessageType.TEXT)
                     _state.update {
@@ -2581,6 +3273,28 @@ class CommandsViewModel(
             }
             return
         }
+        val fallbackHandler: (ByteArray, String) -> Unit = { bytes, mime ->
+            viewModelScope.launch {
+                floatingControlManager.setMiniChatVoiceState(isListening = false)
+                floatingControlManager.showMiniChatReply("جارٍ تحليل صوتك الاحتياطي...")
+            }
+            processRecordedAudio(bytes, mime, fromMiniChat = true)
+        }
+        if (voiceManager.isCurrentlyListening()) {
+            voiceManager.stopListening(
+                onAudioRecordedFallback = fallbackHandler,
+                onError = { err ->
+                    viewModelScope.launch {
+                        floatingControlManager.setMiniChatVoiceState(isListening = false)
+                        floatingControlManager.showMiniChatReply(err.take(80))
+                    }
+                }
+            )
+            viewModelScope.launch {
+                floatingControlManager.setMiniChatVoiceState(isListening = false)
+            }
+            return
+        }
         viewModelScope.launch {
             floatingControlManager.setMiniChatVoiceState(isListening = true)
         }
@@ -2596,12 +3310,7 @@ class CommandsViewModel(
                 }
                 submitMiniChatCommand(transcript)
             },
-            onAudioRecordedFallback = { _, _ ->
-                viewModelScope.launch {
-                    floatingControlManager.setMiniChatVoiceState(isListening = false)
-                    floatingControlManager.showMiniChatReply("تحدّث بوضوح أو اكتب أمرك في الشريط.")
-                }
-            },
+            onAudioRecordedFallback = fallbackHandler,
             onError = { err ->
                 viewModelScope.launch {
                     floatingControlManager.setMiniChatVoiceState(isListening = false)
@@ -2655,6 +3364,7 @@ class CommandsViewModel(
         approvalDeferred = null
 
         voiceManager.stopSpeaking()
+        clearCachedRecordedAudio()
         if (_state.value.isListening) {
             runCatching {
                 voiceManager.stopListening(onAudioRecordedFallback = { _, _ -> }, onError = {})
@@ -2844,6 +3554,7 @@ class CommandsViewModel(
         executionJob?.cancel()
         geminiTimerJob?.cancel()
         geminiTimerJob = null
+        clearCachedRecordedAudio()
         executionController.reset()
         _state.update {
             it.copy(
@@ -2882,7 +3593,13 @@ class CommandsViewModel(
 
     private fun speakIfEnabled(text: String) {
         if (_state.value.voiceConversationMode && text.isNotBlank()) {
-            voiceManager.speakArabic(text)
+            val tier = _state.value.networkTier
+            val maxChars = if (tier == NetworkTier.WEAK_E_2G || tier == NetworkTier.OFFLINE) {
+                VoiceAssistantManager.WEAK_NETWORK_SPEECH_MAX_CHARS
+            } else {
+                VoiceAssistantManager.DEFAULT_SPEECH_MAX_CHARS
+            }
+            voiceManager.speakArabic(text, maxChars = maxChars)
         }
     }
 
@@ -2951,11 +3668,304 @@ class CommandsViewModel(
         super.onCleared()
         sensitiveActionGate.setApprovalHandler(null)
         ScreenStateBridge.setTaskActive(false)
+        clearCachedRecordedAudio()
+        networkConnectivityMonitor.unregister()
         runCatching { appContext.unregisterReceiver(packageChangeReceiver) }
         voiceManager.release()
     }
 
+    // ==================== وظائف المرحلة 6 (الذاكرة، العادات، الروتين الصباحي، التلخيص اليومي، التنبؤ) ====================
+
+    fun openMemoryHabitsDialog() {
+        _state.update { it.copy(showMemoryHabitsDialog = true) }
+    }
+
+    fun dismissMemoryHabitsDialog() {
+        _state.update { it.copy(showMemoryHabitsDialog = false) }
+    }
+
+    fun forgetMemoryFact(id: Long) {
+        viewModelScope.launch {
+            userMemoryRepository.forgetFact(id)
+        }
+    }
+
+    fun clearAllUserMemory() {
+        viewModelScope.launch {
+            synchronized(conversationTurns) {
+                conversationTurns.clear()
+            }
+            userMemoryRepository.clearMemory()
+            memoryAndHabitPreferences.setTurnsSinceLastSummary(0)
+        }
+    }
+
+    fun clearAllHabits() {
+        viewModelScope.launch {
+            userMemoryRepository.clearHabits()
+            memoryAndHabitPreferences.clearDismissedSuggestionKeys()
+            _state.update { it.copy(activePredictiveSuggestion = null) }
+        }
+    }
+
+    fun setPredictiveLearningEnabled(enabled: Boolean) {
+        memoryAndHabitPreferences.setPredictiveLearningEnabled(enabled)
+        _state.update {
+            it.copy(
+                predictiveLearningEnabled = enabled,
+                activePredictiveSuggestion = if (!enabled) null else it.activePredictiveSuggestion
+            )
+        }
+        if (enabled) {
+            viewModelScope.launch { refreshPredictiveSuggestion() }
+        }
+    }
+
+    fun setAnonymizedHabitGeminiConsent(consented: Boolean) {
+        memoryAndHabitPreferences.setAnonymizedHabitGeminiConsent(consented)
+        _state.update { it.copy(anonymizedHabitGeminiConsent = consented) }
+        if (consented && memoryAndHabitPreferences.isPredictiveLearningEnabled()) {
+            viewModelScope.launch { refreshPredictiveSuggestion() }
+        }
+    }
+
+    fun resetMorningRoutineApproval() {
+        memoryAndHabitPreferences.setMorningRoutineApproved(false)
+        _state.update { it.copy(morningRoutineApproved = false) }
+    }
+
+    fun dismissPredictiveSuggestion() {
+        val current = _state.value.activePredictiveSuggestion ?: return
+        memoryAndHabitPreferences.addDismissedSuggestionKey(current.key)
+        _state.update { it.copy(activePredictiveSuggestion = null) }
+    }
+
+    /**
+     * التعلّم التنبؤي لا ينفّذ تلقائياً أبداً: عند ضغط المستخدم على زر التجهيز نضع الأمر المقترح في مربع الإدخال فقط ليراجعه ويرسله بنفسه.
+     */
+    fun applyPredictiveSuggestion() {
+        val current = _state.value.activePredictiveSuggestion ?: return
+        _state.update {
+            it.copy(
+                inputText = current.suggestedCommand,
+                activePredictiveSuggestion = null
+            )
+        }
+    }
+
+    suspend fun refreshPredictiveSuggestion(nowMillis: Long = System.currentTimeMillis()) {
+        if (privacyPreferences.isPrivacyModeEnabled() || !memoryAndHabitPreferences.isPredictiveLearningEnabled()) {
+            _state.update { it.copy(activePredictiveSuggestion = null) }
+            return
+        }
+        val localSuggestion = habitLearningEngine.detectLocalPredictiveSuggestion(nowMillis)
+        if (localSuggestion == null) {
+            _state.update { it.copy(activePredictiveSuggestion = null) }
+            return
+        }
+
+        // لا يُرسل إلى Gemini أي بيانات خام؛ فقط ملخص مجهول الهوية عند موافقة المستخدم المعلنة
+        val finalSuggestion = if (memoryAndHabitPreferences.isAnonymizedHabitGeminiConsent()) {
+            val anonymized = habitLearningEngine.getAnonymizedSummaryIfConsented(nowMillis)
+            if (anonymized != null) {
+                val refinedReason = runCatching {
+                    geminiRepository.suggestNextHabitStepFromAnonymizedSummary(
+                        anonymizedSummary = anonymized.first,
+                        timeBucketAr = anonymized.second
+                    ).value
+                }.getOrNull()?.takeIf { it.isNotBlank() }
+                if (refinedReason != null) {
+                    localSuggestion.copy(
+                        reasonAr = "$refinedReason\n(${localSuggestion.suggestedCommand})",
+                        isFromGemini = true
+                    )
+                } else {
+                    localSuggestion
+                }
+            } else {
+                localSuggestion
+            }
+        } else {
+            localSuggestion
+        }
+
+        _state.update { it.copy(activePredictiveSuggestion = finalSuggestion) }
+    }
+
+    private suspend fun handleMorningRoutine(
+        installedApps: List<InstalledAppInfo>,
+        userCommand: String
+    ) {
+        if (!memoryAndHabitPreferences.isMorningRoutineApproved()) {
+            val promptMsg = "اختصار «الروتين الصباحي» جاهز! يرجى تأكيد الموافقة لمرة واحدة فقط لتشغيله بأمر واحد مستقبلاً: سأعرض لك مهامك الصباحية وتذكيرات اليوم وأبرز تطبيقاتك الصباحية دون تنفيذ أي إجراء محظور."
+            recordConversationTurn(userCommand, promptMsg)
+            chatHistoryRepository.addAgentMessage(promptMsg, ChatMessageType.TEXT)
+            _state.update {
+                it.copy(
+                    uiState = CommandsUiState.Idle,
+                    pendingMorningRoutineApproval = true,
+                    lastSpokenReply = promptMsg
+                )
+            }
+            speakIfEnabled(promptMsg)
+            return
+        }
+        executeMorningRoutineSteps(installedApps, userCommand)
+    }
+
+    fun approveMorningRoutine() {
+        memoryAndHabitPreferences.setMorningRoutineApproved(true)
+        _state.update {
+            it.copy(
+                pendingMorningRoutineApproval = false,
+                morningRoutineApproved = true
+            )
+        }
+        viewModelScope.launch {
+            actionLogRepository.logAction(
+                title = "الموافقة الأولى على الروتين الصباحي",
+                details = "اعتمد المستخدم اختصار الروتين الصباحي للتشغيل بأمر واحد مستقبلاً.",
+                status = ActionStatus.SUCCESS,
+                actionType = "MORNING_ROUTINE_APPROVED"
+            )
+            val installed = ensureInstalledAppsLoaded()
+            executeMorningRoutineSteps(installed, "الروتين الصباحي")
+        }
+    }
+
+    fun dismissMorningRoutineApproval() {
+        _state.update { it.copy(pendingMorningRoutineApproval = false) }
+        viewModelScope.launch {
+            val msg = "تم إلغاء تفعيل الروتين الصباحي بناءً على طلبك."
+            chatHistoryRepository.addAgentMessage(msg, ChatMessageType.TEXT)
+            _state.update { it.copy(lastSpokenReply = msg) }
+        }
+    }
+
+    internal suspend fun executeMorningRoutineSteps(
+        installedApps: List<InstalledAppInfo>,
+        userCommand: String = "الروتين الصباحي"
+    ) {
+        habitLearningEngine.syncHabits(installedApps)
+        val activeTasks = chatHistoryRepository.getActiveTasks()
+        val pendingTasks = activeTasks.filter { !it.isCompleted && !it.isCancelled }
+        val habits = userMemoryRepository.getTopHabits()
+        val favoriteMorningApp = HabitLearningEngine.selectMorningFavoriteApp(habits, installedApps)
+
+        var openedAppNote = ""
+        if (favoriteMorningApp != null && agentPolicy.evaluateCommand("افتح ${favoriteMorningApp.label}").allowed) {
+            val launchIntent = AppOrganizer.createLaunchIntent(appContext, favoriteMorningApp.packageName)
+            if (launchIntent != null) {
+                val started = runCatching { appContext.startActivity(launchIntent) }.isSuccess
+                if (started) {
+                    openedAppNote = "• تم فتح تطبيقك الصباحي المعتاد: «${favoriteMorningApp.label}»."
+                }
+            }
+        }
+
+        val summary = buildString {
+            appendLine("☀️ تم تنفيذ «الروتين الصباحي»:")
+            if (pendingTasks.isEmpty()) {
+                appendLine("• لا توجد مهام أو منبهات معلّقة حالياً.")
+            } else {
+                appendLine("• لديك ${pendingTasks.size} مهام/تذكيرات نشطة: ${pendingTasks.take(4).joinToString("، ") { it.title }}.")
+            }
+            if (openedAppNote.isNotBlank()) {
+                appendLine(openedAppNote)
+            } else {
+                appendLine("• يمكنك قول «ذكّرني بـ...» أو «لخّص يومي» لمتابعة يومك.")
+            }
+        }.trim()
+
+        val cal = Calendar.getInstance()
+        userMemoryRepository.recordHabit(
+            actionName = "الروتين الصباحي",
+            hourOfDay = cal.get(Calendar.HOUR_OF_DAY),
+            dayOfWeek = HabitLearningEngine.calendarDayToIso(cal.get(Calendar.DAY_OF_WEEK))
+        )
+        actionLogRepository.logAction(
+            title = "تنفيذ الروتين الصباحي",
+            details = summary,
+            status = ActionStatus.SUCCESS,
+            actionType = "MORNING_ROUTINE"
+        )
+        recordConversationTurn(userCommand, summary)
+        chatHistoryRepository.addAgentMessage(summary, ChatMessageType.TEXT)
+        _state.update { it.copy(uiState = CommandsUiState.Idle, lastSpokenReply = summary) }
+        speakIfEnabled(summary)
+    }
+
+    internal suspend fun handleSummarizeMyDay(
+        installedApps: List<InstalledAppInfo>,
+        userCommand: String = "لخّص يومي"
+    ) {
+        habitLearningEngine.syncHabits(installedApps)
+        val cal = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        val startOfDayMillis = cal.timeInMillis
+        val todayLogs = actionLogRepository.getLogsSince(startOfDayMillis)
+        val tasks = chatHistoryRepository.getActiveTasks()
+        val habits = userMemoryRepository.getTopHabits()
+        val digest = HabitLearningEngine.buildDaySummaryDigest(todayLogs, tasks, habits)
+
+        val isPrivacy = privacyPreferences.isPrivacyModeEnabled()
+        val isOffline = networkConnectivityMonitor.refreshNow() == NetworkTier.OFFLINE
+        val finalReply = if (isPrivacy || isOffline) {
+            val label = if (isPrivacy) "📋 ملخص يومك المحلي (وضع الخصوصية مفعّل):" else "📋 ملخص يومك المحلي (دون اتصال بالشبكة):"
+            "$label\n$digest"
+        } else {
+            runCatching {
+                startGeminiProgressTimer(
+                    doingNowAr = "ألخّص إنجازات يومك ومهامك...",
+                    nextStepAr = "عرض ملخص اليوم في المحادثة",
+                    waitingAr = "انتظار النموذج الخفيف (Lite)"
+                )
+                val meta = geminiRepository.summarizeDayWithLite(digest)
+                recordModelRouteUsage(meta, userCommand)
+                meta.value
+            }.getOrNull()?.takeIf { it.isNotBlank() } ?: "📋 ملخص يومك:\n$digest"
+        }
+        stopGeminiProgressTimer()
+
+        val nowCal = Calendar.getInstance()
+        userMemoryRepository.recordHabit(
+            actionName = "لخّص يومي",
+            hourOfDay = nowCal.get(Calendar.HOUR_OF_DAY),
+            dayOfWeek = HabitLearningEngine.calendarDayToIso(nowCal.get(Calendar.DAY_OF_WEEK))
+        )
+        actionLogRepository.logAction(
+            title = "تلخيص اليوم (لخّص يومي)",
+            details = "تم تلخيص ${todayLogs.size} إجراءات و${tasks.size} مهام.",
+            status = ActionStatus.SUCCESS,
+            actionType = "SUMMARIZE_MY_DAY"
+        )
+        recordConversationTurn(userCommand, finalReply)
+        chatHistoryRepository.addAgentMessage(finalReply, ChatMessageType.TEXT)
+        _state.update {
+            it.copy(
+                uiState = CommandsUiState.Idle,
+                liveDoingNowAr = "",
+                liveNextStepAr = "",
+                liveWaitingForUserAr = "",
+                lastSpokenReply = finalReply
+            )
+        }
+        speakIfEnabled(finalReply)
+    }
+
     companion object {
+        internal const val MAX_ACTIVE_CONVERSATION_TURNS = 30
+        internal const val KEEP_AFTER_TRUNCATION_TURNS = 20
+
+        internal fun resolveTimeoutSeconds(tier: NetworkTier): Int = when (tier) {
+            NetworkTier.WEAK_E_2G -> (com.example.data.ai.WEAK_NETWORK_COMMAND_TIMEOUT_MS / 1000L).toInt()
+            else -> (com.example.data.ai.TOTAL_GEMINI_COMMAND_TIMEOUT_MS / 1000L).toInt()
+        }
+
         internal fun buildTruthReport(
             succeeded: List<String>,
             unverified: List<String> = emptyList(),
@@ -3012,10 +4022,32 @@ class CommandsViewModel(
             actionLogRepository = actionLogRepository,
             agentPolicy = agentPolicy
         ),
-        private val privacyPreferences: com.example.security.PrivacyPreferences = com.example.security.PrivacyPreferences(appContext)
+        private val privacyPreferences: com.example.security.PrivacyPreferences = com.example.security.PrivacyPreferences(appContext),
+        private val userMemoryRepository: UserMemoryRepository? = null,
+        private val memoryAndHabitPreferences: MemoryAndHabitPreferences = MemoryAndHabitPreferences(appContext),
+        private val habitLearningEngine: HabitLearningEngine? = null,
+        private val networkConnectivityMonitor: NetworkConnectivityMonitor? = null,
+        private val queuedCommandDao: QueuedCommandDao? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
+            val db = PhoneAgentDatabase.getInstance(appContext)
+            val resolvedMemoryRepo = userMemoryRepository ?: UserMemoryRepository(
+                memoryDao = db.userMemoryDao(),
+                habitDao = db.habitLogDao(),
+                summaryDao = db.conversationSummaryDao(),
+                privacyPreferences = privacyPreferences
+            )
+            val resolvedHabitEngine = habitLearningEngine ?: HabitLearningEngine(
+                appContext = appContext,
+                userMemoryRepository = resolvedMemoryRepo,
+                actionLogDao = db.actionLogDao(),
+                memoryPrefs = memoryAndHabitPreferences,
+                privacyPreferences = privacyPreferences,
+                agentPolicy = agentPolicy
+            )
+            val resolvedNetworkMonitor = networkConnectivityMonitor ?: NetworkConnectivityMonitor(appContext)
+            val resolvedQueuedDao = queuedCommandDao ?: db.queuedCommandDao()
             return CommandsViewModel(
                 geminiRepository = geminiRepository,
                 commandExecutor = commandExecutor,
@@ -3031,7 +4063,12 @@ class CommandsViewModel(
                 agentPolicy = agentPolicy,
                 sensitiveActionGate = sensitiveActionGate,
                 phoneFileManager = phoneFileManager,
-                privacyPreferences = privacyPreferences
+                privacyPreferences = privacyPreferences,
+                userMemoryRepository = resolvedMemoryRepo,
+                memoryAndHabitPreferences = memoryAndHabitPreferences,
+                habitLearningEngine = resolvedHabitEngine,
+                networkConnectivityMonitor = resolvedNetworkMonitor,
+                queuedCommandDao = resolvedQueuedDao
             ) as T
         }
     }

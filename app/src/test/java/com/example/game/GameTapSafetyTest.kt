@@ -47,6 +47,7 @@ class GameTapSafetyTest {
             override suspend fun insertLog(log: ActionLogEntity): Long = 1L
             override suspend fun updateStatus(id: Long, status: String, canUndo: Boolean) {}
             override suspend fun markUndone(id: Long, status: String) {}
+            override suspend fun getLogsSince(sinceTimestamp: Long): List<ActionLogEntity> = emptyList()
             override suspend fun clearAllLogs() {}
         }
         return GeneralGameEngine(

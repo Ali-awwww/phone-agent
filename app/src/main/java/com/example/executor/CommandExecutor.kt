@@ -67,8 +67,12 @@ class CommandExecutor(
                 gateResult.timedOut -> "APPROVAL_TIMEOUT_${step.actionType.name}"
                 else -> "USER_REJECTED_SENSITIVE_${step.actionType.name}"
             }
-            val reason = gateResult.reasonAr.ifBlank {
-                "تم إيقاف الخطوة «${step.titleAr}» لعدم اكتمال الموافقة."
+            val rawReason = gateResult.reasonAr
+            val reason = when {
+                gateResult.blockedByPolicy && !rawReason.contains("بدلاً من ذلك") ->
+                    com.example.data.local.UserMemoryRepository.formatPlainPolicyRejection(actionTypeTag)
+                rawReason.isNotBlank() -> rawReason
+                else -> com.example.data.local.UserMemoryRepository.formatPlainPolicyRejection(actionTypeTag)
             }
             val logId = actionLogRepository.logAction(
                 title = step.titleAr,
@@ -486,9 +490,20 @@ class CommandExecutor(
 
     private suspend fun executeReadAndSummarize(step: AgentPlanStep): Pair<Boolean, String> {
         val service = ScreenStateBridge.getService()
-        val snapshot = service?.captureCurrentScreen()
+        val snapshot = service?.captureCurrentScreen()?.also {
+            ScreenStateBridge.updateSnapshot(it)
+        }
             ?: ScreenStateBridge.latestSnapshot.value
             ?: return false to "لا توجد محتويات مقروءة من الشاشة حالياً. تأكد من تفعيل خدمة إمكانية الوصول."
+
+        val isPrivacyOn = privacyPreferences?.isPrivacyModeEnabled() == true
+        if (isPrivacyOn) {
+            return true to com.example.verifier.LocalScreenSummarizer.summarizeSnapshot(
+                snapshot = snapshot,
+                appLabel = step.targetAppName,
+                privacyMode = true
+            )
+        }
 
         return try {
             val summary = geminiRepository.summarizeAppScreens(
@@ -497,8 +512,15 @@ class CommandExecutor(
                 capturedScreenTexts = listOf(snapshot.toCompactPromptText())
             )
             true to summary
-        } catch (e: Exception) {
-            false to "تعذر تلخيص الشاشة: ${e.localizedMessage}"
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            val localFallback = com.example.verifier.LocalScreenSummarizer.summarizeSnapshot(
+                snapshot = snapshot,
+                appLabel = step.targetAppName,
+                privacyMode = false
+            )
+            true to localFallback
         }
     }
 }

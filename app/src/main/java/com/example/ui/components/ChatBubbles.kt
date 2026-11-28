@@ -54,10 +54,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -99,6 +102,26 @@ data class ChatAppCardItem(
     val label: String,
     val folderAr: String
 )
+
+object ChatTextTruncator {
+    const val DEFAULT_MAX_CHARS = 380
+
+    fun shouldTruncate(text: String, maxChars: Int = DEFAULT_MAX_CHARS): Boolean =
+        text.length > maxChars
+
+    fun truncate(text: String, maxChars: Int = DEFAULT_MAX_CHARS): String {
+        if (text.length <= maxChars) return text
+        val limit = maxChars.coerceAtLeast(100)
+        val slice = text.take(limit)
+        val lastBreak = slice.lastIndexOfAny(charArrayOf(' ', '\n', '،', '.'))
+        val prefix = if (lastBreak >= (limit * 0.65).toInt()) {
+            slice.substring(0, lastBreak).trimEnd()
+        } else {
+            slice.trimEnd()
+        }
+        return "$prefix…"
+    }
+}
 
 data class ChatTaskCardItem(
     val id: Long,
@@ -550,12 +573,41 @@ fun ChatMessageBubble(
                     }
                 }
 
+                val shouldTruncate = remember(message.id, message.text, isUser) {
+                    !isUser && ChatTextTruncator.shouldTruncate(message.text)
+                }
+                var isExpanded by remember(message.id) { mutableStateOf(false) }
+                val displayedText = remember(message.text, shouldTruncate, isExpanded) {
+                    if (shouldTruncate && !isExpanded) {
+                        ChatTextTruncator.truncate(message.text)
+                    } else {
+                        message.text
+                    }
+                }
+
                 Text(
-                    text = message.text,
+                    text = displayedText,
                     style = MaterialTheme.typography.bodyMedium,
                     color = if (isUser) Color.White else CyberTextPrimary,
                     softWrap = true
                 )
+
+                if (shouldTruncate) {
+                    TextButton(
+                        onClick = { isExpanded = !isExpanded },
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("read_more_button_${message.id}"),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = if (isExpanded) "عرض أقل" else "اقرأ المزيد",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = CyberElectricCyan
+                        )
+                    }
+                }
 
                 if (!isUser && msgType == ChatMessageType.APPS_LIST && !message.payloadJson.isNullOrBlank()) {
                     val appCards = remember(message.payloadJson) {

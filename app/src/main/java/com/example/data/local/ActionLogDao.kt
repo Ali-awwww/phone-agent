@@ -26,6 +26,9 @@ interface ActionLogDao {
     @Query("UPDATE action_logs SET isUndone = 1, canUndo = 0, status = :status WHERE id = :id")
     suspend fun markUndone(id: Long, status: String = ActionStatus.UNDONE.name)
 
+    @Query("SELECT * FROM action_logs WHERE actionType NOT LIKE 'MODEL_ROUTE_%' AND timestamp >= :sinceTimestamp ORDER BY timestamp DESC")
+    suspend fun getLogsSince(sinceTimestamp: Long): List<ActionLogEntity>
+
     @Query("DELETE FROM action_logs")
     suspend fun clearAllLogs()
 }

@@ -37,6 +37,26 @@ sealed interface ChatRouteIntent {
     data class ExecuteCommandPlan(val command: String) : ChatRouteIntent
 
     data class FileManagement(val queryText: String) : ChatRouteIntent
+
+    data object MorningRoutine : ChatRouteIntent
+
+    data object SummarizeMyDay : ChatRouteIntent
+
+    data class LocalOpenApp(
+        val appQuery: String,
+        val rawCommand: String
+    ) : ChatRouteIntent
+
+    data class LocalDialPhone(
+        val targetQuery: String,
+        val phoneNumber: String?,
+        val rawCommand: String
+    ) : ChatRouteIntent
+
+    data class LocalToggleWifi(
+        val enableHint: Boolean?,
+        val rawCommand: String
+    ) : ChatRouteIntent
 }
 
 enum class GameGestureAction {
@@ -109,6 +129,16 @@ object ChatIntentRouter {
             return ChatRouteIntent.ReadScreen
         }
 
+        // 1.4 الروتين الصباحي (أمر واحد بعد الموافقة الأولى)
+        if (isMorningRoutineRequest(norm)) {
+            return ChatRouteIntent.MorningRoutine
+        }
+
+        // 1.45 لخّص يومي من المحادثة (S2-5c)
+        if (isSummarizeDayRequest(norm)) {
+            return ChatRouteIntent.SummarizeMyDay
+        }
+
         // 1.5 عرض سجل ما فعله الوكيل («ماذا فعلت؟»)
         if (isActionHistoryRequest(norm)) {
             return ChatRouteIntent.ShowActionHistory
@@ -134,6 +164,11 @@ object ChatIntentRouter {
         detectCancelTaskRequest(norm)?.let { return it }
         detectTaskIntentOrPrompt(raw, norm)?.let { return it }
 
+        // 4.5 أوامر محلية فورية بلا نموذج أو شبكة (الواي فاي، الاتصال، فتح تطبيق)
+        detectLocalToggleWifiIntent(raw, norm)?.let { return it }
+        detectLocalDialPhoneIntent(raw, norm)?.let { return it }
+        detectLocalOpenAppIntent(raw, norm)?.let { return it }
+
         // 5. أوامر الهاتف التنفيذية داخل التطبيقات والإعدادات (Flash)
         if (isPhoneUsageCommand(norm, knownAppNames)) {
             return ChatRouteIntent.ExecuteCommandPlan(raw)
@@ -145,7 +180,7 @@ object ChatIntentRouter {
 
     /**
      * تصنيف خفيف للنية لاختيار النموذج المناسب عبر Firebase AI Logic:
-     * - نقاش / سؤال عام / استشارة / معرفة عامة → ModelRouteTier.LITE
+     * - نقاش / سؤال عام / استشارة / معرفة عامة / تلخيص يومي → ModelRouteTier.LITE
      * - استخدام الهاتف (فتح تطبيق، تنفيذ أمر، اللعب، قراءة الشاشة، تنفيذ مهمة) → ModelRouteTier.FLASH
      */
     fun classifyModelTier(
@@ -153,7 +188,8 @@ object ChatIntentRouter {
         knownAppNames: List<String> = emptyList()
     ): ModelRouteTier {
         return when (classifyIntent(rawInput, knownAppNames)) {
-            is ChatRouteIntent.ConversationalChat -> ModelRouteTier.LITE
+            is ChatRouteIntent.ConversationalChat,
+            is ChatRouteIntent.SummarizeMyDay -> ModelRouteTier.LITE
             is ChatRouteIntent.ReadScreen,
             is ChatRouteIntent.StartGameplay,
             is ChatRouteIntent.ExecuteCommandPlan,
@@ -163,8 +199,44 @@ object ChatIntentRouter {
             is ChatRouteIntent.ShowApps,
             is ChatRouteIntent.ShowActionHistory,
             is ChatRouteIntent.PromptReminderDetails,
-            is ChatRouteIntent.FileManagement -> ModelRouteTier.FLASH
+            is ChatRouteIntent.FileManagement,
+            is ChatRouteIntent.MorningRoutine,
+            is ChatRouteIntent.LocalOpenApp,
+            is ChatRouteIntent.LocalDialPhone,
+            is ChatRouteIntent.LocalToggleWifi -> ModelRouteTier.FLASH
         }
+    }
+
+    private fun isMorningRoutineRequest(norm: String): Boolean {
+        val cleaned = norm.replace("؟", "").replace("?", "").trim()
+        val phrases = listOf(
+            "الروتين الصباحي",
+            "روتين الصباح",
+            "روتيني الصباحي",
+            "شغل الروتين الصباحي",
+            "ابدا الروتين الصباحي",
+            "تنفيذ الروتين الصباحي",
+            "morning routine"
+        )
+        return phrases.any { cleaned.contains(it) }
+    }
+
+    private fun isSummarizeDayRequest(norm: String): Boolean {
+        val cleaned = norm.replace("؟", "").replace("?", "").trim()
+        val phrases = listOf(
+            "لخص يومي",
+            "لخص لي يومي",
+            "تلخيص يومي",
+            "ملخص يومي",
+            "ملخص اليوم",
+            "تقرير يومي",
+            "تقرير اليوم",
+            "كيف كان يومي",
+            "ماذا انجزت اليوم",
+            "summarize my day",
+            "daily summary"
+        )
+        return phrases.any { cleaned.contains(it) }
     }
 
     private fun isFileManagementRequest(norm: String): Boolean {
@@ -337,6 +409,9 @@ object ChatIntentRouter {
     }
 
     private fun detectTaskIntentOrPrompt(raw: String, norm: String): ChatRouteIntent? {
+        if (Regex("^(?:افتح|شغل|تشغيل|فتح)\\s+(?:تطبيق\\s+|برنامج\\s+)?(?:ال)?(?:منبه|ساعة|الساعة)\\b").containsMatchIn(norm)) {
+            return null
+        }
         val isReminder = Regex("(?:ذكرني|نبهني|تذكير|اضبط تذكير|انشئ تذكير|remind me)").containsMatchIn(norm)
         val isAlarm = Regex("(?:منبه|اضبط منبه|ضبط منبه|set alarm)").containsMatchIn(norm)
         val isTask = Regex("(?:اضف مهمة|انشئ مهمة|مهمة جديدة|سجل مهمة|مهمة:|add task)").containsMatchIn(norm)
@@ -434,18 +509,86 @@ object ChatIntentRouter {
             return true
         }
 
-        // إذا ذكر المستخدم اسماً لتطبيق مثبت ولم يكن سؤالاً معرفياً عاماً («ما هو ...» / «اشرح ...»)
         val isInformationalQuestion = Regex("^(?:ما\\s*(?:هو|هي|معني|فائدة|الفرق)|كيف\\s+يعمل|حدثني\\s+عن|اخبرني\\s+عن|اشرح|معلومات\\s+عن|what\\s+is)\\b")
             .containsMatchIn(norm)
         if (!isInformationalQuestion) {
-            val mentionsInstalledApp = knownAppNames.any { appLabel ->
-                val clean = normalizeDigitsAndArabic(appLabel).lowercase()
-                clean.length >= 2 && norm.contains(clean)
+            if (com.example.organizer.AppNameMatcher.mentionsKnownApp(norm, knownAppNames)) {
+                return true
             }
-            if (mentionsInstalledApp) return true
         }
 
         return false
+    }
+
+    private fun detectLocalToggleWifiIntent(raw: String, norm: String): ChatRouteIntent.LocalToggleWifi? {
+        val isInformationalQuestion = Regex("^(?:ما\\s*(?:هو|هي|معني|فائدة)|كيف\\s+يعمل|اشرح|what\\s+is)\\b")
+            .containsMatchIn(norm)
+        if (isInformationalQuestion) return null
+
+        val hasWifiWord = Regex("(?:واي\\s*فاي|\\bwi-?fi\\b)").containsMatchIn(norm)
+        if (!hasWifiWord) return null
+
+        val compoundMarkers = listOf("وابحث", "وارسل", "واضغط", " ثم ", " وبعد", " بلوتوث")
+        if (compoundMarkers.any { norm.contains(it) }) return null
+
+        val enableVerbs = Regex("(?:شغل|افتح|فعل|تشغيل|تفعيل|turn\\s+on|enable|open)")
+        val disableVerbs = Regex("(?:اطفئ|اطفاء|اغلق|ايقاف|عطل|تعطيل|سكر|turn\\s+off|disable)")
+        val enableHint = when {
+            disableVerbs.containsMatchIn(norm) -> false
+            enableVerbs.containsMatchIn(norm) -> true
+            else -> null
+        }
+        return ChatRouteIntent.LocalToggleWifi(enableHint = enableHint, rawCommand = raw)
+    }
+
+    private fun detectLocalDialPhoneIntent(raw: String, norm: String): ChatRouteIntent.LocalDialPhone? {
+        val normMatch = Regex(
+            "^(?:من\\s+فضلك\\s+)?(?:اتصل\\s+(?:بـ?|علي|على)?|مكالمة\\s+(?:مع|الي|لـ?)?|دق\\s+(?:علي|على)?|اجر(?:ي)?\\s+مكالمة\\s*(?:مع|الي)?|\\bcall\\b|\\bdial\\b)\\s*(.+)$",
+            RegexOption.IGNORE_CASE
+        ).find(norm) ?: return null
+
+        val rawMatch = Regex(
+            "^(?:من\\s+فضلك\\s+)?(?:اتصل\\s+(?:بـ?|علي|على)?|مكالمة\\s+(?:مع|إلي|الي|لـ?)?|دق\\s+(?:علي|على)?|أجر(?:ي)?|اجر(?:ي)?\\s+مكالمة\\s*(?:مع|إلي|الي)?|\\bcall\\b|\\bdial\\b)\\s*(.+)$",
+            RegexOption.IGNORE_CASE
+        ).find(raw)
+
+        val target = rawMatch?.groupValues?.get(1)?.trim() ?: normMatch.groupValues[1].trim()
+        if (target.isBlank()) return null
+
+        val digitsOnly = target.replace(Regex("[^+0-9]"), "")
+        val phoneNumber = digitsOnly.takeIf { it.count { c -> c.isDigit() } >= 3 }
+        return ChatRouteIntent.LocalDialPhone(
+            targetQuery = target,
+            phoneNumber = phoneNumber,
+            rawCommand = raw
+        )
+    }
+
+    private fun detectLocalOpenAppIntent(raw: String, norm: String): ChatRouteIntent.LocalOpenApp? {
+        val compoundMarkers = listOf(
+            "وابحث", "وارسل", "واكتب", "واضغط", "وانقر", " ثم ", "وبعدها", " و ", " عن "
+        )
+        if (compoundMarkers.any { norm.contains(it) }) return null
+
+        val match = Regex(
+            "^(?:من\\s+فضلك\\s+)?(?:افتح|شغل|تشغيل|فتح|افتحي|شغلي|\\bopen\\b|\\blaunch\\b)\\s+(.+)$",
+            RegexOption.IGNORE_CASE
+        ).find(norm) ?: return null
+
+        val rawTarget = match.groupValues[1]
+            .replace(Regex("^(?:تطبيق|برنامج|لعبة|لعبه|app|game)\\s+"), "")
+            .replace(Regex("[؟?.!]+$"), "")
+            .trim()
+        if (rawTarget.isBlank()) return null
+
+        // تجنّب التقاط طلبات الإشعارات أو الشاشة أو السجل العامة
+        val excludedTargets = listOf("شاشتي", "الشاشة", "السجل", "الملفات", "المجلدات", "سلة المهملات")
+        if (excludedTargets.any { rawTarget.contains(it) }) return null
+
+        return ChatRouteIntent.LocalOpenApp(
+            appQuery = rawTarget,
+            rawCommand = raw
+        )
     }
 
     fun computeDueMillis(

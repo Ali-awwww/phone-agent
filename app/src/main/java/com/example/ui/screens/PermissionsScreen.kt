@@ -65,6 +65,7 @@ import com.example.permissions.AgentPermissionItem
 import com.example.permissions.AgentPermissionType
 import com.example.permissions.PermissionHelper
 import com.example.ui.components.CyberPanelCard
+import com.example.ui.components.MemoryAndHabitsManagementSection
 import com.example.ui.theme.CyberBorderGlow
 import com.example.ui.theme.CyberElectricCyan
 import com.example.ui.theme.CyberOnCyan
@@ -85,6 +86,12 @@ fun PermissionsScreen(
     modifier: Modifier = Modifier
 ) {
     val permissions by viewModel.permissions.collectAsStateWithLifecycle()
+    val memories by viewModel.memories.collectAsStateWithLifecycle()
+    val habits by viewModel.habits.collectAsStateWithLifecycle()
+    val isPrivacyMode by viewModel.isPrivacyModeEnabled.collectAsStateWithLifecycle()
+    val predictiveLearningEnabled by viewModel.predictiveLearningEnabled.collectAsStateWithLifecycle()
+    val anonymizedHabitGeminiConsent by viewModel.anonymizedHabitGeminiConsent.collectAsStateWithLifecycle()
+    val morningRoutineApproved by viewModel.morningRoutineApproved.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var pendingRuntimeType by remember { mutableStateOf<AgentPermissionType?>(null) }
@@ -223,7 +230,6 @@ fun PermissionsScreen(
             }
 
             item {
-                val isPrivacyMode by viewModel.isPrivacyModeEnabled.collectAsStateWithLifecycle()
                 CyberPanelCard(
                     containerColor = CyberSurfaceNavy,
                     borderColor = if (isPrivacyMode) StatusSuccess.copy(alpha = 0.7f) else CyberElectricCyan.copy(alpha = 0.45f),
@@ -314,6 +320,23 @@ fun PermissionsScreen(
                         )
                     }
                 }
+            }
+
+            item {
+                MemoryAndHabitsManagementSection(
+                    memories = memories,
+                    habits = habits,
+                    isPrivacyModeEnabled = isPrivacyMode,
+                    predictiveLearningEnabled = predictiveLearningEnabled,
+                    anonymizedHabitGeminiConsent = anonymizedHabitGeminiConsent,
+                    morningRoutineApproved = morningRoutineApproved,
+                    onTogglePredictiveLearning = { viewModel.setPredictiveLearningEnabled(it) },
+                    onToggleAnonymizedGeminiConsent = { viewModel.setAnonymizedHabitGeminiConsent(it) },
+                    onResetMorningRoutineApproval = { viewModel.resetMorningRoutineApproval() },
+                    onForgetMemoryFact = { id -> viewModel.forgetMemoryFact(id) },
+                    onClearAllMemory = { viewModel.clearAllUserMemory() },
+                    onClearAllHabits = { viewModel.clearAllHabits() }
+                )
             }
 
             item {

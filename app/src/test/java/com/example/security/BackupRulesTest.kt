@@ -1,9 +1,20 @@
 package com.example.security
 
+import android.content.Context
+import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.sqlite.db.SupportSQLiteOpenHelper
+import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
+import androidx.test.core.app.ApplicationProvider
+import com.example.data.local.PhoneAgentDatabase
 import java.io.File
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class BackupRulesTest {
 
     private fun findXmlFile(relativePath: String): File {
@@ -51,5 +62,40 @@ class BackupRulesTest {
         assertTrue(transferSection.contains("<exclude domain=\"file\""))
         assertTrue(transferSection.contains("<exclude domain=\"root\""))
         assertTrue(transferSection.contains("<exclude domain=\"external\""))
+    }
+
+    @Test
+    fun `user_memory habit_logs and conversation_summaries reside in excluded local Room database`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = PhoneAgentDatabase.getInstance(context)
+        val sqlite = db.openHelper.writableDatabase
+        val tables = mutableSetOf<String>()
+        sqlite.query("SELECT name FROM sqlite_master WHERE type='table'").use { cursor ->
+            while (cursor.moveToNext()) {
+                tables.add(cursor.getString(0))
+            }
+        }
+        assertTrue("user_memory must exist in Room DB excluded from backup", "user_memory" in tables)
+        assertTrue("habit_logs must exist in Room DB excluded from backup", "habit_logs" in tables)
+        assertTrue("conversation_summaries must exist in Room DB excluded from backup", "conversation_summaries" in tables)
+
+        // التحقق من ترحيل الإصدار 3 إلى 4 لإنشاء جدول ملخصات المحادثة بأمان
+        val tempHelper = FrameworkSQLiteOpenHelperFactory().create(
+            SupportSQLiteOpenHelper.Configuration.builder(context)
+                .name(null)
+                .callback(object : SupportSQLiteOpenHelper.Callback(3) {
+                    override fun onCreate(db: SupportSQLiteDatabase) {}
+                    override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+                })
+                .build()
+        )
+        val memDb = tempHelper.writableDatabase
+        PhoneAgentDatabase.MIGRATION_3_4.migrate(memDb)
+        val migratedTables = mutableSetOf<String>()
+        memDb.query("SELECT name FROM sqlite_master WHERE type='table'").use { c ->
+            while (c.moveToNext()) migratedTables.add(c.getString(0))
+        }
+        assertTrue("conversation_summaries" in migratedTables)
+        tempHelper.close()
     }
 }

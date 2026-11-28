@@ -63,6 +63,8 @@ class SensitiveActionGateTest {
             }
             override suspend fun updateStatus(id: Long, status: String, canUndo: Boolean) {}
             override suspend fun markUndone(id: Long, status: String) {}
+            override suspend fun getLogsSince(sinceTimestamp: Long): List<ActionLogEntity> =
+                recordedLogs.filter { it.timestamp >= sinceTimestamp }
             override suspend fun clearAllLogs() { recordedLogs.clear() }
         }
         return Triple(

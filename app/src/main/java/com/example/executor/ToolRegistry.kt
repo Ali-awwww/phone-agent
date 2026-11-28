@@ -46,6 +46,18 @@ object ToolRegistry {
         )
         register(
             AgentToolDefinition(
+                name = "dial_phone",
+                titleAr = "فتح شاشة الاتصال",
+                descriptionAr = "فتح تطبيق الهاتف برقم أو اسم المطلوب عبر واجهة الاتصال الرسمية دون إجراء مكالمة صامتة.",
+                parameters = listOf(
+                    ToolParameter("target", "string", "الاسم أو الرقم المطلوب الاتصال به", true)
+                ),
+                requiresApproval = false,
+                category = "COMMUNICATION"
+            )
+        )
+        register(
+            AgentToolDefinition(
                 name = "send_message",
                 titleAr = "إرسال رسالة",
                 descriptionAr = "إرسال رسالة نصية أو عبر تطبيقات التواصل (واتساب وغيرها).",
@@ -142,6 +154,26 @@ object ToolRegistry {
                 category = "DEVICE"
             )
         )
+        register(
+            AgentToolDefinition(
+                name = "morning_routine",
+                titleAr = "الروتين الصباحي",
+                descriptionAr = "تشغيل اختصار الروتين الصباحي بأمر واحد بعد موافقة المستخدم الأولى.",
+                parameters = emptyList(),
+                requiresApproval = true,
+                category = "PRODUCTIVITY"
+            )
+        )
+        register(
+            AgentToolDefinition(
+                name = "summarize_day",
+                titleAr = "لخّص يومي",
+                descriptionAr = "توليد ملخص عربي ليوم المستخدم استناداً إلى سجل الإجراءات والمهام والعادات.",
+                parameters = emptyList(),
+                requiresApproval = false,
+                category = "PRODUCTIVITY"
+            )
+        )
     }
 
     @Synchronized
@@ -187,11 +219,16 @@ object ToolRegistry {
         val intent = ChatIntentRouter.classifyIntentInternal(raw, knownAppNames)
 
         val toolName = when (intent) {
+            is ChatRouteIntent.MorningRoutine -> "morning_routine"
+            is ChatRouteIntent.SummarizeMyDay -> "summarize_day"
             is ChatRouteIntent.ReadScreen -> "read_screen"
             is ChatRouteIntent.ShowActionHistory -> "show_action_history"
             is ChatRouteIntent.FileManagement -> "file_management"
             is ChatRouteIntent.StartGameplay -> "play_game"
             is ChatRouteIntent.ShowApps -> "show_apps"
+            is ChatRouteIntent.LocalOpenApp -> "open_app"
+            is ChatRouteIntent.LocalDialPhone -> "dial_phone"
+            is ChatRouteIntent.LocalToggleWifi -> "open_settings"
             is ChatRouteIntent.ListTasksAndReminders,
             is ChatRouteIntent.CancelTaskOrReminder,
             is ChatRouteIntent.CreateTaskOrReminder,

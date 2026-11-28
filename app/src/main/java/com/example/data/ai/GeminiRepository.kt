@@ -45,7 +45,9 @@ const val FALLBACK_LITE_GEMINI_MODEL = "gemini-3.5-flash-lite"
 const val THIRD_FALLBACK_GEMINI_MODEL = "gemini-4-hydrogen"
 const val MSG_MODEL_BUSY_RETRYING_AR = "النموذج مشغول الآن، أعيد المحاولة..."
 const val TOTAL_GEMINI_COMMAND_TIMEOUT_MS = 65_000L
+const val WEAK_NETWORK_COMMAND_TIMEOUT_MS = 15_000L
 val DEFAULT_OVERLOAD_BACKOFF_MS: List<Long> = listOf(1_000L, 2_000L)
+val WEAK_NETWORK_OVERLOAD_BACKOFF_MS: List<Long> = listOf(350L)
 
 fun getModelChainForTier(tier: ModelRouteTier): List<String> = when (tier) {
     ModelRouteTier.LITE -> listOf(
@@ -398,16 +400,36 @@ class GeminiRepository internal constructor(
     private val overloadRetryDelaysMs: List<Long> = DEFAULT_OVERLOAD_BACKOFF_MS,
     private val delayFn: suspend (Long) -> Unit = { delay(it) },
     private val totalChainTimeoutMs: Long = TOTAL_GEMINI_COMMAND_TIMEOUT_MS,
-    private val privacyPreferences: com.example.security.PrivacyPreferences? = null
+    private val privacyPreferences: com.example.security.PrivacyPreferences? = null,
+    private val networkTierProvider: () -> com.example.network.NetworkTier = { com.example.network.NetworkTier.NORMAL }
 ) {
     constructor(
         appCheckClient: AppCheckTokenClient = FirebaseAppCheckClient(),
-        privacyPreferences: com.example.security.PrivacyPreferences? = null
+        privacyPreferences: com.example.security.PrivacyPreferences? = null,
+        networkTierProvider: () -> com.example.network.NetworkTier = { com.example.network.NetworkTier.NORMAL }
     ) : this(
         appCheckClient = appCheckClient,
         modelClient = FirebaseGeminiModelClient(),
-        privacyPreferences = privacyPreferences
+        privacyPreferences = privacyPreferences,
+        networkTierProvider = networkTierProvider
     )
+
+    private fun isWeakNetwork(): Boolean =
+        networkTierProvider() == com.example.network.NetworkTier.WEAK_E_2G
+
+    private fun effectiveTimeoutForCall(requestedTimeoutMs: Long): Long {
+        val cappedByRepo = minOf(requestedTimeoutMs, totalChainTimeoutMs)
+        return if (isWeakNetwork()) {
+            minOf(cappedByRepo, WEAK_NETWORK_COMMAND_TIMEOUT_MS).coerceAtLeast(1L)
+        } else {
+            cappedByRepo.coerceAtLeast(1L)
+        }
+    }
+
+    private fun resolveEffectiveTierAndChain(requestedTier: ModelRouteTier): Pair<ModelRouteTier, List<String>> {
+        val effectiveTier = if (isWeakNetwork()) ModelRouteTier.LITE else requestedTier
+        return effectiveTier to getModelChainForTier(effectiveTier)
+    }
 
     /**
      * Self-healing Firebase App Check wrapper for every Gemini call:
@@ -504,7 +526,8 @@ class GeminiRepository internal constructor(
         onStatusUpdate: (suspend (String) -> Unit)? = null
     ): ResilientResult<T> {
         require(candidates.isNotEmpty()) { "candidates must not be empty" }
-        val effectiveTotalTimeoutMs = minOf(timeoutMs, totalChainTimeoutMs).coerceAtLeast(1L)
+        val effectiveTotalTimeoutMs = effectiveTimeoutForCall(timeoutMs)
+        val activeDelays = if (isWeakNetwork()) WEAK_NETWORK_OVERLOAD_BACKOFF_MS else overloadRetryDelaysMs
 
         return withTimeout(effectiveTotalTimeoutMs) {
             var lastError: Exception? = null
@@ -537,8 +560,8 @@ class GeminiRepository internal constructor(
                     val waitMs = if (isUnavailable) {
                         0L
                     } else {
-                        overloadRetryDelaysMs.getOrElse(index) {
-                            overloadRetryDelaysMs.lastOrNull() ?: 2_000L
+                        activeDelays.getOrElse(index) {
+                            activeDelays.lastOrNull() ?: 1_000L
                         }
                     }
                     safeLogW(
@@ -616,32 +639,53 @@ class GeminiRepository internal constructor(
                 com.example.security.SensitiveDataScrubber.scrub(currentScreenSummary)
             }
 
-            val prompt = buildString {
-                appendLine(com.example.executor.ToolRegistry.getRegistryPromptDescription())
-                appendLine("طلب المستخدم: $scrubbedCmd")
-                appendLine("أمثلة التطبيقات المثبتة على الجهاز: ${scrubbedApps.take(50).joinToString("، ")}")
-                appendLine("حالة الشاشة الحالية: $effectiveScreenSummary")
-                appendLine("أنشئ خطة تنفيذ دقيقة خطوة بخطوة بصيغة JSON حسب المخطط المطلوب.")
+            val weak = isWeakNetwork()
+            val prompt = if (weak) {
+                buildString {
+                    appendLine("موجّه سريع (اتصال ضعيف E/2G):")
+                    appendLine("الأدوات: open_app, send_message, set_alarm, open_settings, read_screen, file_management.")
+                    appendLine("الطلب: $scrubbedCmd")
+                    appendLine("تطبيقات: ${scrubbedApps.take(15).joinToString("، ")}")
+                    appendLine("الشاشة: ${effectiveScreenSummary.take(350)}")
+                    appendLine("أنشئ خطة JSON موجزة جداً.")
+                }
+            } else {
+                buildString {
+                    appendLine(com.example.executor.ToolRegistry.getRegistryPromptDescription())
+                    appendLine("طلب المستخدم: $scrubbedCmd")
+                    appendLine("أمثلة التطبيقات المثبتة على الجهاز: ${scrubbedApps.take(50).joinToString("، ")}")
+                    appendLine("حالة الشاشة الحالية: $effectiveScreenSummary")
+                    appendLine("أنشئ خطة تنفيذ دقيقة خطوة بخطوة بصيغة JSON حسب المخطط المطلوب.")
+                }
             }
 
-            val chain = getModelChainForTier(ModelRouteTier.FLASH)
-            val result = withModelChainResilience(
-                timeoutMs = totalChainTimeoutMs,
-                onStatusUpdate = onStatusUpdate,
-                candidates = listOf(
+            val (effectiveTier, chain) = resolveEffectiveTierAndChain(ModelRouteTier.FLASH)
+            val candidates = if (effectiveTier == ModelRouteTier.LITE) {
+                listOf(
+                    ModelCallCandidate(chain[0]) { modelClient.generatePlanJsonFallback(prompt) },
+                    ModelCallCandidate(chain[1]) { modelClient.generatePlanJson(prompt) },
+                    ModelCallCandidate(chain[2]) { modelClient.generatePlanJsonThird(prompt) }
+                )
+            } else {
+                listOf(
                     ModelCallCandidate(chain[0]) { modelClient.generatePlanJson(prompt) },
                     ModelCallCandidate(chain[1]) { modelClient.generatePlanJsonFallback(prompt) },
                     ModelCallCandidate(chain[2]) { modelClient.generatePlanJsonThird(prompt) }
                 )
+            }
+            val result = withModelChainResilience(
+                timeoutMs = totalChainTimeoutMs,
+                onStatusUpdate = onStatusUpdate,
+                candidates = candidates
             )
             val plan = parsePlanJson(userCommand, JSONObject(result.value))
             safeLogI(
                 TAG,
-                "ModelRoute tier=FLASH intended=${chain[0]} actual=${result.modelUsed} fallback=${result.usedFallback} (commandPlan)"
+                "ModelRoute tier=${effectiveTier.name} intended=${chain[0]} actual=${result.modelUsed} fallback=${result.usedFallback} (commandPlan)"
             )
             return ModelResponseMetadata(
                 value = plan,
-                tier = ModelRouteTier.FLASH,
+                tier = effectiveTier,
                 intendedModel = chain[0],
                 modelUsed = result.modelUsed,
                 usedFallback = result.usedFallback
@@ -677,20 +721,34 @@ class GeminiRepository internal constructor(
         onStatusUpdate: (suspend (String) -> Unit)? = null
     ): ModelResponseMetadata<Pair<String, AgentPlan>> {
         try {
+            val weak = isWeakNetwork()
             val scrubbedApps = installedAppNames.map { com.example.security.SensitiveDataScrubber.scrub(it) }
-            val prompt = buildString {
-                appendLine("استمع إلى التسجيل الصوتي للمستخدم باللغة العربية، اكتب النص المفهوم في transcriptAr، ثم أنشئ خطة الخطوات التنفيذية.")
-                appendLine("التطبيقات المتاحة: ${scrubbedApps.take(40).joinToString("، ")}")
+            val prompt = if (weak) {
+                "فرّغ الصوت في transcriptAr وأنشئ خطة JSON موجزة جداً. تطبيقات: ${scrubbedApps.take(12).joinToString("، ")}"
+            } else {
+                buildString {
+                    appendLine("استمع إلى التسجيل الصوتي للمستخدم باللغة العربية، اكتب النص المفهوم في transcriptAr، ثم أنشئ خطة الخطوات التنفيذية.")
+                    appendLine("التطبيقات المتاحة: ${scrubbedApps.take(40).joinToString("، ")}")
+                }
             }
-            val chain = getModelChainForTier(ModelRouteTier.FLASH)
-            val result = withModelChainResilience(
-                timeoutMs = totalChainTimeoutMs,
-                onStatusUpdate = onStatusUpdate,
-                candidates = listOf(
+            val (effectiveTier, chain) = resolveEffectiveTierAndChain(ModelRouteTier.FLASH)
+            val candidates = if (effectiveTier == ModelRouteTier.LITE) {
+                listOf(
+                    ModelCallCandidate(chain[0]) { modelClient.generateAudioPlanJsonFallback(audioBytes, mimeType, prompt) },
+                    ModelCallCandidate(chain[1]) { modelClient.generateAudioPlanJson(audioBytes, mimeType, prompt) },
+                    ModelCallCandidate(chain[2]) { modelClient.generateAudioPlanJsonThird(audioBytes, mimeType, prompt) }
+                )
+            } else {
+                listOf(
                     ModelCallCandidate(chain[0]) { modelClient.generateAudioPlanJson(audioBytes, mimeType, prompt) },
                     ModelCallCandidate(chain[1]) { modelClient.generateAudioPlanJsonFallback(audioBytes, mimeType, prompt) },
                     ModelCallCandidate(chain[2]) { modelClient.generateAudioPlanJsonThird(audioBytes, mimeType, prompt) }
                 )
+            }
+            val result = withModelChainResilience(
+                timeoutMs = totalChainTimeoutMs,
+                onStatusUpdate = onStatusUpdate,
+                candidates = candidates
             )
             val json = JSONObject(result.value)
             val rawTranscript = json.optString("transcriptAr", "").ifBlank { "أمر صوتي" }
@@ -698,11 +756,11 @@ class GeminiRepository internal constructor(
             val plan = parsePlanJson(transcript, json)
             safeLogI(
                 TAG,
-                "ModelRoute tier=FLASH intended=${chain[0]} actual=${result.modelUsed} fallback=${result.usedFallback} (audioPlan)"
+                "ModelRoute tier=${effectiveTier.name} intended=${chain[0]} actual=${result.modelUsed} fallback=${result.usedFallback} (audioPlan)"
             )
             return ModelResponseMetadata(
                 value = transcript to plan,
-                tier = ModelRouteTier.FLASH,
+                tier = effectiveTier,
                 intendedModel = chain[0],
                 modelUsed = result.modelUsed,
                 usedFallback = result.usedFallback
@@ -743,12 +801,14 @@ class GeminiRepository internal constructor(
                 StepActionType.SEND_MESSAGE,
                 StepActionType.CHANGE_SETTING
             )
+        val weak = isWeakNetwork()
         val isPrivacyOn = privacyPreferences?.isPrivacyModeEnabled() == true
-        val screenText = if (isPrivacyOn) {
+        val rawScreenText = if (isPrivacyOn) {
             snapshot.toMinimalPrivacyPromptText()
         } else {
             snapshot.toCompactPromptText()
         }
+        val screenText = if (weak) rawScreenText.take(350) else rawScreenText
         val prompt = buildString {
             appendLine("الخطوة المنفذة: ${com.example.security.SensitiveDataScrubber.scrub(step.titleAr)} (${com.example.security.SensitiveDataScrubber.scrub(step.descriptionAr)})")
             appendLine("نوع الإجراء: ${step.actionType.name}")
@@ -759,18 +819,27 @@ class GeminiRepository internal constructor(
             appendLine("محتوى الشاشة المرصود الآن:")
             appendLine(screenText)
         }
-            val chain = getModelChainForTier(ModelRouteTier.FLASH)
-            val result = withModelChainResilience(
-                timeoutMs = totalChainTimeoutMs,
-                candidates = listOf(
+            val (effectiveTier, chain) = resolveEffectiveTierAndChain(ModelRouteTier.FLASH)
+            val candidates = if (effectiveTier == ModelRouteTier.LITE) {
+                listOf(
+                    ModelCallCandidate(chain[0]) { modelClient.generateVerificationJsonFallback(prompt) },
+                    ModelCallCandidate(chain[1]) { modelClient.generateVerificationJson(prompt) },
+                    ModelCallCandidate(chain[2]) { modelClient.generateVerificationJsonThird(prompt) }
+                )
+            } else {
+                listOf(
                     ModelCallCandidate(chain[0]) { modelClient.generateVerificationJson(prompt) },
                     ModelCallCandidate(chain[1]) { modelClient.generateVerificationJsonFallback(prompt) },
                     ModelCallCandidate(chain[2]) { modelClient.generateVerificationJsonThird(prompt) }
                 )
+            }
+            val result = withModelChainResilience(
+                timeoutMs = totalChainTimeoutMs,
+                candidates = candidates
             )
             safeLogI(
                 TAG,
-                "ModelRoute tier=FLASH intended=${chain[0]} actual=${result.modelUsed} fallback=${result.usedFallback} (verifyScreen)"
+                "ModelRoute tier=${effectiveTier.name} intended=${chain[0]} actual=${result.modelUsed} fallback=${result.usedFallback} (verifyScreen)"
             )
             parseVerificationResponse(result.value)
         } catch (e: CancellationException) {
@@ -874,14 +943,19 @@ class GeminiRepository internal constructor(
         onStatusUpdate: (suspend (String) -> Unit)? = null
     ): ModelResponseMetadata<String> {
         try {
+            val weak = isWeakNetwork()
             val isPrivacyOn = privacyPreferences?.isPrivacyModeEnabled() == true
             val effectiveScreens = if (isPrivacyOn) {
                 capturedScreenTexts.take(2).map { com.example.security.SensitiveDataScrubber.minimizeScreenContextForPrivacyMode(it) }
             } else {
-                capturedScreenTexts.map { com.example.security.SensitiveDataScrubber.scrub(it) }
+                val mapped = capturedScreenTexts.map { com.example.security.SensitiveDataScrubber.scrub(it) }
+                if (weak) mapped.take(1).map { it.take(400) } else mapped
             }
             val joined = effectiveScreens.joinToString("\n---\n")
-            val prompt = """
+            val prompt = if (weak) {
+                "لخّص الشاشة التالية في 3 نقاط عربية قصيرة جداً:\nالتطبيق: ${com.example.security.SensitiveDataScrubber.scrub(appName)}\n$joined"
+            } else {
+                """
                 قم بتجربة وفحص التطبيق التالي وقدّم ملخصاً عربياً واضحاً ومرتباً للمستخدم يشرح:
                 1. ما وظيفة التطبيق الأساسية؟
                 2. ما الأقسام والميزات الظاهرة في شاشاته؟
@@ -891,25 +965,35 @@ class GeminiRepository internal constructor(
                 الحزمة: $packageName
                 النصوص المرصودة من شاشات التطبيق:
                 $joined
-            """.trimIndent()
+                """.trimIndent()
+            }
 
-            val chain = getModelChainForTier(ModelRouteTier.FLASH)
-            val result = withModelChainResilience(
-                timeoutMs = 60_000L,
-                onStatusUpdate = onStatusUpdate,
-                candidates = listOf(
+            val (effectiveTier, chain) = resolveEffectiveTierAndChain(ModelRouteTier.FLASH)
+            val candidates = if (effectiveTier == ModelRouteTier.LITE) {
+                listOf(
+                    ModelCallCandidate(chain[0]) { modelClient.generateLiteGeneralArabicText(prompt) },
+                    ModelCallCandidate(chain[1]) { modelClient.generateGeneralArabicText(prompt) },
+                    ModelCallCandidate(chain[2]) { modelClient.generateGeneralArabicTextThird(prompt) }
+                )
+            } else {
+                listOf(
                     ModelCallCandidate(chain[0]) { modelClient.generateGeneralArabicText(prompt) },
                     ModelCallCandidate(chain[1]) { modelClient.generateLiteGeneralArabicText(prompt) },
                     ModelCallCandidate(chain[2]) { modelClient.generateGeneralArabicTextThird(prompt) }
                 )
+            }
+            val result = withModelChainResilience(
+                timeoutMs = 60_000L,
+                onStatusUpdate = onStatusUpdate,
+                candidates = candidates
             )
             safeLogI(
                 TAG,
-                "ModelRoute tier=FLASH intended=${chain[0]} actual=${result.modelUsed} fallback=${result.usedFallback} (screenRead)"
+                "ModelRoute tier=${effectiveTier.name} intended=${chain[0]} actual=${result.modelUsed} fallback=${result.usedFallback} (screenRead)"
             )
             return ModelResponseMetadata(
                 value = result.value,
-                tier = ModelRouteTier.FLASH,
+                tier = effectiveTier,
                 intendedModel = chain[0],
                 modelUsed = result.modelUsed,
                 usedFallback = result.usedFallback
@@ -999,28 +1083,41 @@ class GeminiRepository internal constructor(
         modelTier: ModelRouteTier = ModelRouteTier.LITE
     ): ModelResponseMetadata<String> {
         return try {
+            val weak = isWeakNetwork()
             val isPrivacyOn = privacyPreferences?.isPrivacyModeEnabled() == true
             val scrubbedMsg = com.example.security.SensitiveDataScrubber.scrub(userMessage)
-            val scrubbedContext = if (isPrivacyOn) {
+            val rawContext = if (isPrivacyOn) {
                 com.example.security.SensitiveDataScrubber.minimizeScreenContextForPrivacyMode(contextSummary)
             } else {
                 com.example.security.SensitiveDataScrubber.scrub(contextSummary)
             }
-            val effectiveHistory = if (isPrivacyOn) "" else com.example.security.SensitiveDataScrubber.scrub(history)
+            val scrubbedContext = if (weak) rawContext.take(250) else rawContext
+            val rawHistory = if (isPrivacyOn) "" else com.example.security.SensitiveDataScrubber.scrub(history)
+            val effectiveHistory = if (weak) rawHistory.takeLast(350) else rawHistory
 
-            val prompt = buildString {
-                if (effectiveHistory.isNotBlank()) {
-                    appendLine("سجل المحادثة السابق:")
-                    appendLine(effectiveHistory)
-                    appendLine("تعليمات هامة: استخدم سجل المحادثة لحل الضمائر (هو/هي/هذه/ذلك) ولا تبدأ بتحية جديدة إذا كان هناك سجل؛ أجب عن السؤال مباشرة بالرجوع إلى ما سبق.")
-                    appendLine()
+            val prompt = if (weak) {
+                buildString {
+                    if (effectiveHistory.isNotBlank()) {
+                        appendLine("سجل مختصر: $effectiveHistory")
+                    }
+                    appendLine("السؤال: $scrubbedMsg")
+                    append("أجب بإيجاز شديد بالعربية في سطر أو سطرين فقط.")
                 }
-                appendLine("رسالة المستخدم الحالية: $scrubbedMsg")
-                appendLine("سياق الحالة الحالية: $scrubbedContext")
-                append("أجب برد عربي طبيعي وواضح ومفيد كمساعد ذكي متكامل.")
+            } else {
+                buildString {
+                    if (effectiveHistory.isNotBlank()) {
+                        appendLine("سجل المحادثة السابق:")
+                        appendLine(effectiveHistory)
+                        appendLine("تعليمات هامة: استخدم سجل المحادثة لحل الضمائر (هو/هي/هذه/ذلك) ولا تبدأ بتحية جديدة إذا كان هناك سجل؛ أجب عن السؤال مباشرة بالرجوع إلى ما سبق.")
+                        appendLine()
+                    }
+                    appendLine("رسالة المستخدم الحالية: $scrubbedMsg")
+                    appendLine("سياق الحالة الحالية: $scrubbedContext")
+                    append("أجب برد عربي طبيعي وواضح ومفيد كمساعد ذكي متكامل.")
+                }
             }
-            val chain = getModelChainForTier(modelTier)
-            val candidates = if (modelTier == ModelRouteTier.LITE) {
+            val (effectiveTier, chain) = resolveEffectiveTierAndChain(modelTier)
+            val candidates = if (effectiveTier == ModelRouteTier.LITE) {
                 listOf(
                     ModelCallCandidate(chain[0]) { modelClient.generateLiteGeneralArabicText(prompt) },
                     ModelCallCandidate(chain[1]) { modelClient.generateGeneralArabicText(prompt) },
@@ -1041,11 +1138,11 @@ class GeminiRepository internal constructor(
             )
             safeLogI(
                 TAG,
-                "ModelRoute tier=${modelTier.name} intended=${chain[0]} actual=${result.modelUsed} fallback=${result.usedFallback} (conversational)"
+                "ModelRoute tier=${effectiveTier.name} intended=${chain[0]} actual=${result.modelUsed} fallback=${result.usedFallback} (conversational)"
             )
             ModelResponseMetadata(
                 value = result.value,
-                tier = modelTier,
+                tier = effectiveTier,
                 intendedModel = chain[0],
                 modelUsed = result.modelUsed,
                 usedFallback = result.usedFallback
@@ -1057,6 +1154,123 @@ class GeminiRepository internal constructor(
             safeLogE(TAG, "Conversational reply failed", e)
             throw e
         }
+    }
+
+    /**
+     * S2-1 & F18: تلخيص دوري أو تلخيص الأدوار المقتطعة عبر النموذج الخفيف (Lite).
+     */
+    suspend fun summarizeConversationWithLite(
+        turnsText: String,
+        isPeriodicMilestone: Boolean = true,
+        onStatusUpdate: (suspend (String) -> Unit)? = null
+    ): ModelResponseMetadata<String> {
+        val scrubbed = com.example.security.SensitiveDataScrubber.scrub(turnsText).trim()
+        val prompt = if (isPeriodicMilestone) {
+            """
+                لخّص الحوار التالي في فقرة عربية مركّزة ومختصرة (3 إلى 5 نقاط قصيرة) لاستخدامها كذاكرة دائمة مختصرة للجلسات القادمة.
+                استخرج التفضيلات العامة والحقائق المهمة والاهتمامات، وتجنب تماماً ذكر أي كلمات مرور أو أرقام هواتف أو حسابات بنكية:
+
+                $scrubbed
+            """.trimIndent()
+        } else {
+            """
+                لخّص الأدوار القديمة التالية من المحادثة في سطرين أو ثلاث نقاط مختصرة بالعربية لحفظ السياق قبل اقتطاعها من النافذة النشطة:
+
+                $scrubbed
+            """.trimIndent()
+        }
+
+        val chain = getModelChainForTier(ModelRouteTier.LITE)
+        val result = withModelChainResilience(
+            timeoutMs = 30_000L,
+            onStatusUpdate = onStatusUpdate,
+            candidates = listOf(
+                ModelCallCandidate(chain[0]) { modelClient.generateLiteGeneralArabicText(prompt) },
+                ModelCallCandidate(chain[1]) { modelClient.generateGeneralArabicText(prompt) },
+                ModelCallCandidate(chain[2]) { modelClient.generateGeneralArabicTextThird(prompt) }
+            )
+        )
+        safeLogI(
+            TAG,
+            "ModelRoute tier=LITE intended=${chain[0]} actual=${result.modelUsed} fallback=${result.usedFallback} (memorySummary)"
+        )
+        return ModelResponseMetadata(
+            value = com.example.security.SensitiveDataScrubber.scrub(result.value).trim(),
+            tier = ModelRouteTier.LITE,
+            intendedModel = chain[0],
+            modelUsed = result.modelUsed,
+            usedFallback = result.usedFallback
+        )
+    }
+
+    /**
+     * S2-5c: «لخّص يومي» من المحادثة باستخدام النموذج الخفيف (Lite).
+     */
+    suspend fun summarizeDayWithLite(
+        dailyDigest: String,
+        onStatusUpdate: (suspend (String) -> Unit)? = null
+    ): ModelResponseMetadata<String> {
+        val scrubbed = com.example.security.SensitiveDataScrubber.scrub(dailyDigest).trim()
+        val prompt = """
+            بناءً على بيانات النشاط الحقيقية التالية من جهاز المستخدم اليوم، قدّم ملخصاً عربياً دافئاً وواضحاً ومنظماً ليومه في نقاط موجزة، مع الإشارة إلى ما أُنجز وما بقي من مهام دون اختراع أي أحداث غير موجودة في البيانات:
+
+            $scrubbed
+        """.trimIndent()
+
+        val chain = getModelChainForTier(ModelRouteTier.LITE)
+        val result = withModelChainResilience(
+            timeoutMs = 35_000L,
+            onStatusUpdate = onStatusUpdate,
+            candidates = listOf(
+                ModelCallCandidate(chain[0]) { modelClient.generateLiteGeneralArabicText(prompt) },
+                ModelCallCandidate(chain[1]) { modelClient.generateGeneralArabicText(prompt) },
+                ModelCallCandidate(chain[2]) { modelClient.generateGeneralArabicTextThird(prompt) }
+            )
+        )
+        safeLogI(
+            TAG,
+            "ModelRoute tier=LITE intended=${chain[0]} actual=${result.modelUsed} fallback=${result.usedFallback} (daySummary)"
+        )
+        return ModelResponseMetadata(
+            value = result.value.trim(),
+            tier = ModelRouteTier.LITE,
+            intendedModel = chain[0],
+            modelUsed = result.modelUsed,
+            usedFallback = result.usedFallback
+        )
+    }
+
+    /**
+     * المرحلة 6 (g): اقتراح خطوة قادمة من ملخص عادات مجهول الهوية فقط وبموافقة صريحة.
+     */
+    suspend fun suggestNextHabitStepFromAnonymizedSummary(
+        anonymizedSummary: String,
+        timeBucketAr: String
+    ): ModelResponseMetadata<String> {
+        val scrubbed = com.example.security.SensitiveDataScrubber.scrub(anonymizedSummary).trim()
+        val prompt = """
+            أمامك ملخص مجهول الهوية لأنماط استخدام عامة في الفترة ($timeBucketAr) دون أي بيانات شخصية أو أسماء حزم:
+            $scrubbed
+
+            اقترح جملة عربية قصيرة ولطيفة واحدة فقط تقترح على المستخدم الخطوة القادمة المفيدة دون تنفيذ أي شيء تلقائياً.
+        """.trimIndent()
+
+        val chain = getModelChainForTier(ModelRouteTier.LITE)
+        val result = withModelChainResilience(
+            timeoutMs = 25_000L,
+            candidates = listOf(
+                ModelCallCandidate(chain[0]) { modelClient.generateLiteGeneralArabicText(prompt) },
+                ModelCallCandidate(chain[1]) { modelClient.generateGeneralArabicText(prompt) },
+                ModelCallCandidate(chain[2]) { modelClient.generateGeneralArabicTextThird(prompt) }
+            )
+        )
+        return ModelResponseMetadata(
+            value = result.value.trim(),
+            tier = ModelRouteTier.LITE,
+            intendedModel = chain[0],
+            modelUsed = result.modelUsed,
+            usedFallback = result.usedFallback
+        )
     }
 
     data class MiniChatDirectiveResult(
@@ -1078,14 +1292,17 @@ class GeminiRepository internal constructor(
         history: String = "",
         wasGameplayRunning: Boolean = false
     ): ModelResponseMetadata<MiniChatDirectiveResult> {
+        val weak = isWeakNetwork()
         val isPrivacyOn = privacyPreferences?.isPrivacyModeEnabled() == true
         val scrubbedCmd = com.example.security.SensitiveDataScrubber.scrub(userCommand)
-        val scrubbedScreen = if (isPrivacyOn) {
+        val rawScreen = if (isPrivacyOn) {
             com.example.security.SensitiveDataScrubber.minimizeScreenContextForPrivacyMode(screenSummary)
         } else {
             com.example.security.SensitiveDataScrubber.scrub(screenSummary)
         }
-        val effectiveHistory = if (isPrivacyOn) "" else com.example.security.SensitiveDataScrubber.scrub(history)
+        val scrubbedScreen = if (weak) rawScreen.take(350) else rawScreen
+        val rawHistory = if (isPrivacyOn) "" else com.example.security.SensitiveDataScrubber.scrub(history)
+        val effectiveHistory = if (weak) rawHistory.takeLast(250) else rawHistory
 
         val prompt = buildString {
             if (effectiveHistory.isNotBlank()) {
@@ -1096,24 +1313,39 @@ class GeminiRepository internal constructor(
             appendLine("أنت تتحكم حالياً في الشاشة التالية عبر شريط الدردشة المصغّر:")
             appendLine(scrubbedScreen.ifBlank { "لا توجد تفاصيل شاشة حالياً." })
             appendLine()
-            appendLine("قواعد إلزامية:")
-            appendLine("1) لا تطلب من المستخدم أبداً أن يضغط أي زر بنفسه ولا تعطه تعليمات يدوية؛ إما أن تنفّذ الإجراء بنفسك (TAP_TEXT أو TAP_XY أو SWIPE أو SCROLL أو INPUT_TEXT أو BACK) أو تُرجع shouldAct=false و action=\"NONE\" وتذكر بوضوح أنك لا ترى الزر على الشاشة.")
-            appendLine("2) استخدم إحداثيات x و y فقط من «مواقع العناصر المرصودة» الموجودة في ملخص الشاشة أعلاه، ولا تخمّن إحداثيات غير مرصودة أبداً.")
-            appendLine("3) إذا كانت الشاشة شبه فارغة بلا أزرار واضحة، أرجع shouldAct=false و action=\"NONE\" و replyOneLineAr=\"لا أرى أزرار اللعبة — صف لي مكان الزر\".")
-            appendLine()
+            if (!weak) {
+                appendLine("قواعد إلزامية:")
+                appendLine("1) لا تطلب من المستخدم أبداً أن يضغط أي زر بنفسه ولا تعطه تعليمات يدوية؛ إما أن تنفّذ الإجراء بنفسك (TAP_TEXT أو TAP_XY أو SWIPE أو SCROLL أو INPUT_TEXT أو BACK) أو تُرجع shouldAct=false و action=\"NONE\" وتذكر بوضوح أنك لا ترى الزر على الشاشة.")
+                appendLine("2) استخدم إحداثيات x و y فقط من «مواقع العناصر المرصودة» الموجودة في ملخص الشاشة أعلاه، ولا تخمّن إحداثيات غير مرصودة أبداً.")
+                appendLine("3) إذا كانت الشاشة شبه فارغة بلا أزرار واضحة، أرجع shouldAct=false و action=\"NONE\" و replyOneLineAr=\"لا أرى أزرار اللعبة — صف لي مكان الزر\".")
+                appendLine()
+            } else {
+                appendLine("نفّذ مباشرة باستخدام العناصر المرصودة أو أعد action=\"NONE\" بإيجاز شديد.")
+            }
             appendLine("توجيه المستخدم الفوري: $scrubbedCmd")
             appendLine("هل كان وضع اللعب التلقائي يعمل؟ $wasGameplayRunning")
             appendLine("أجب بصيغة JSON فقط بدون شرح خارجي:")
             append("""{"shouldAct":true,"action":"TAP_TEXT|TAP_XY|SWIPE|SCROLL|INPUT_TEXT|BACK|NONE","text":"النص الدقيق على الشاشة إن وجد","inputText":"النص المراد كتابته عند INPUT_TEXT","x":0.5,"y":0.5,"endX":0.5,"endY":0.2,"continuePlaying":$wasGameplayRunning,"replyOneLineAr":"رد عربي قصير جداً في سطر واحد"}""")
         }
 
-        val chain = getModelChainForTier(ModelRouteTier.FLASH)
-        val (result, finalDirective) = withTimeout(totalChainTimeoutMs) {
+        val (effectiveTier, chain) = resolveEffectiveTierAndChain(ModelRouteTier.FLASH)
+        val firstCall: suspend (String) -> String = if (effectiveTier == ModelRouteTier.LITE) {
+            { p -> modelClient.generateLiteGeneralArabicText(p) }
+        } else {
+            { p -> modelClient.generateGeneralArabicText(p) }
+        }
+        val secondCall: suspend (String) -> String = if (effectiveTier == ModelRouteTier.LITE) {
+            { p -> modelClient.generateGeneralArabicText(p) }
+        } else {
+            { p -> modelClient.generateLiteGeneralArabicText(p) }
+        }
+
+        val (result, finalDirective) = withTimeout(effectiveTimeoutForCall(totalChainTimeoutMs)) {
             var res = withModelChainResilience(
                 timeoutMs = totalChainTimeoutMs,
                 candidates = listOf(
-                    ModelCallCandidate(chain[0]) { modelClient.generateGeneralArabicText(prompt) },
-                    ModelCallCandidate(chain[1]) { modelClient.generateLiteGeneralArabicText(prompt) },
+                    ModelCallCandidate(chain[0]) { firstCall(prompt) },
+                    ModelCallCandidate(chain[1]) { secondCall(prompt) },
                     ModelCallCandidate(chain[2]) { modelClient.generateGeneralArabicTextThird(prompt) }
                 )
             )
@@ -1126,8 +1358,8 @@ class GeminiRepository internal constructor(
                 res = withModelChainResilience(
                     timeoutMs = totalChainTimeoutMs,
                     candidates = listOf(
-                        ModelCallCandidate(chain[0]) { modelClient.generateGeneralArabicText(strictJsonPrompt) },
-                        ModelCallCandidate(chain[1]) { modelClient.generateLiteGeneralArabicText(strictJsonPrompt) },
+                        ModelCallCandidate(chain[0]) { firstCall(strictJsonPrompt) },
+                        ModelCallCandidate(chain[1]) { secondCall(strictJsonPrompt) },
                         ModelCallCandidate(chain[2]) { modelClient.generateGeneralArabicTextThird(strictJsonPrompt) }
                     )
                 )
@@ -1137,7 +1369,7 @@ class GeminiRepository internal constructor(
         }
         return ModelResponseMetadata(
             value = finalDirective,
-            tier = ModelRouteTier.FLASH,
+            tier = effectiveTier,
             intendedModel = chain[0],
             modelUsed = result.modelUsed,
             usedFallback = result.usedFallback
@@ -1202,15 +1434,24 @@ class GeminiRepository internal constructor(
         onStatusUpdate: (suspend (String) -> Unit)? = null
     ): Pair<Boolean, String> {
         val startTime = System.currentTimeMillis()
-        val chain = getModelChainForTier(ModelRouteTier.FLASH)
-        val result = withModelChainResilience(
-            timeoutMs = 20_000L,
-            onStatusUpdate = onStatusUpdate,
-            candidates = listOf(
+        val (effectiveTier, chain) = resolveEffectiveTierAndChain(ModelRouteTier.FLASH)
+        val candidates = if (effectiveTier == ModelRouteTier.LITE) {
+            listOf(
+                ModelCallCandidate(chain[0]) { modelClient.pingModelTestFallback() },
+                ModelCallCandidate(chain[1]) { modelClient.pingModelTest() },
+                ModelCallCandidate(chain[2]) { modelClient.pingModelTestThird() }
+            )
+        } else {
+            listOf(
                 ModelCallCandidate(chain[0]) { modelClient.pingModelTest() },
                 ModelCallCandidate(chain[1]) { modelClient.pingModelTestFallback() },
                 ModelCallCandidate(chain[2]) { modelClient.pingModelTestThird() }
             )
+        }
+        val result = withModelChainResilience(
+            timeoutMs = 20_000L,
+            onStatusUpdate = onStatusUpdate,
+            candidates = candidates
         )
         val elapsed = System.currentTimeMillis() - startTime
         val reply = result.value

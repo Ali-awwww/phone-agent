@@ -258,7 +258,12 @@ class ScreenVerifier(
             )
         }
 
-        if (postSnapshot?.hasSensitiveSecurityField == true) {
+        // لقطة شاشة جديدة عند الطلب قبل التحقق إذا كانت الخدمة متصلة (F15)
+        val effectivePostSnapshot = postSnapshot ?: ScreenStateBridge.getService()?.captureCurrentScreen()?.also {
+            ScreenStateBridge.updateSnapshot(it)
+        }
+
+        if (effectivePostSnapshot?.hasSensitiveSecurityField == true) {
             return ScreenVerificationResult(
                 verified = false,
                 status = StepVerificationStatus.VERIFICATION_FAILED,
@@ -268,23 +273,23 @@ class ScreenVerifier(
         }
 
         // تحقق مباشر وملموس من الحزمة عند فتح تطبيق
-        if (step.actionType == StepActionType.OPEN_APP && postSnapshot != null && !step.verifiedAppPackage.isNullOrBlank()) {
-            if (postSnapshot.packageName.isNotBlank() &&
-                postSnapshot.packageName != context.packageName &&
-                postSnapshot.packageName != step.verifiedAppPackage
+        if (step.actionType == StepActionType.OPEN_APP && effectivePostSnapshot != null && !step.verifiedAppPackage.isNullOrBlank()) {
+            if (effectivePostSnapshot.packageName.isNotBlank() &&
+                effectivePostSnapshot.packageName != context.packageName &&
+                effectivePostSnapshot.packageName != step.verifiedAppPackage
             ) {
                 return ScreenVerificationResult(
                     verified = false,
                     status = StepVerificationStatus.VERIFICATION_FAILED,
-                    explanationAr = "التطبيق المفتوح حالياً (${postSnapshot.packageName}) لا يطابق التطبيق المطلوب (${step.verifiedAppPackage})."
+                    explanationAr = "التطبيق المفتوح حالياً (${effectivePostSnapshot.packageName}) لا يطابق التطبيق المطلوب (${step.verifiedAppPackage})."
                 )
             }
         }
 
         // تحقق مباشر من ظهور النص المُدخل على الشاشة الفعلية
-        if (step.actionType == StepActionType.INPUT_TEXT && postSnapshot != null) {
+        if (step.actionType == StepActionType.INPUT_TEXT && effectivePostSnapshot != null) {
             val typed = step.targetQueryOrText.trim()
-            if (typed.isNotBlank() && postSnapshot.visibleTexts.none { it.contains(typed, ignoreCase = true) }) {
+            if (typed.isNotBlank() && effectivePostSnapshot.visibleTexts.none { it.contains(typed, ignoreCase = true) }) {
                 return ScreenVerificationResult(
                     verified = false,
                     status = StepVerificationStatus.VERIFICATION_FAILED,
@@ -294,7 +299,7 @@ class ScreenVerifier(
         }
 
         // دون لقطة شاشة فعلية لا يُسجَّل أي إجراء كـ VERIFIED_ON_SCREEN إطلاقاً
-        if (postSnapshot == null) {
+        if (effectivePostSnapshot == null) {
             return ScreenVerificationResult(
                 verified = false,
                 status = StepVerificationStatus.UNABLE_TO_VERIFY,
@@ -302,7 +307,7 @@ class ScreenVerifier(
             )
         }
 
-        val geminiVerdict = geminiRepository.verifyScreenAfterStep(step, postSnapshot)
+        val geminiVerdict = geminiRepository.verifyScreenAfterStep(step, effectivePostSnapshot)
         val finalStatus = when {
             geminiVerdict.sensitiveUiDetected -> StepVerificationStatus.VERIFICATION_FAILED
             geminiVerdict.status == StepVerificationStatus.UNABLE_TO_VERIFY -> StepVerificationStatus.UNABLE_TO_VERIFY
@@ -319,48 +324,7 @@ class ScreenVerifier(
         appNameOrPackage: String,
         installedApps: List<InstalledAppInfo>
     ): InstalledAppInfo? {
-        val query = appNameOrPackage.trim().lowercase()
-        if (query.isEmpty()) return null
-
-        installedApps.firstOrNull {
-            it.label.lowercase() == query || it.packageName.lowercase() == query
-        }?.let { return it }
-
-        installedApps.firstOrNull {
-            it.label.lowercase().contains(query) || it.packageName.lowercase().contains(query)
-        }?.let { return it }
-
-        val aliasMap = mapOf(
-            "واتساب" to listOf("whatsapp"),
-            "واتس" to listOf("whatsapp"),
-            "يوتيوب" to listOf("youtube"),
-            "جوجل" to listOf("google", "chrome"),
-            "كروم" to listOf("chrome"),
-            "الخرائط" to listOf("maps"),
-            "خرائط" to listOf("maps"),
-            "الإعدادات" to listOf("settings"),
-            "الاعدادات" to listOf("settings"),
-            "الرسائل" to listOf("messaging", "mms", "messages"),
-            "الهاتف" to listOf("dialer", "phone"),
-            "الساعة" to listOf("deskclock", "clock"),
-            "الكاميرا" to listOf("camera"),
-            "تليجرام" to listOf("telegram"),
-            "تيليجرام" to listOf("telegram"),
-            "انستقرام" to listOf("instagram"),
-            "تويتر" to listOf("twitter", "x.android"),
-            "متجر" to listOf("vending", "play")
-        )
-        for ((arKey, pkgHints) in aliasMap) {
-            if (query.contains(arKey)) {
-                val match = installedApps.firstOrNull { app ->
-                    pkgHints.any { hint ->
-                        app.packageName.lowercase().contains(hint) || app.label.lowercase().contains(hint)
-                    }
-                }
-                if (match != null) return match
-            }
-        }
-        return null
+        return com.example.organizer.AppNameMatcher.findBestMatch(appNameOrPackage, installedApps)
     }
 
     private fun extractDigitSequences(text: String): List<String> {
